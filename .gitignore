@@ -1,0 +1,7 @@
+target/
+tmp/
+node_modules/
+.pnpm-store/
+dist/
+.vscode/
+.claude/worktrees/
