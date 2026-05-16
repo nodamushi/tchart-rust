@@ -1,0 +1,24 @@
+// @titlealign の center / left / right を網羅
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+@title "Default Center Title"
+
+A     _~_~_~_~
+
+@titlealign left
+@title "Left Aligned"
+
+B     _~_~_~_~
+
+@titlealign right
+@title "Right Aligned"
+
+C     _~_~_~_~
+
+@titlealign center
+@title "Back to Center"
+
+D     _~_~_~_~

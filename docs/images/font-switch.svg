@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:tchart="http://tchart-rust/1.0" width="155.64" height="160.8" viewBox="0 0 155.64 160.8"><metadata><tchart:source>// @font 途中切替の波及範囲確認
+// 仕様: docs/spec/tcml-format.md §ローカルパラメータ + §`@-&gt;` 行記述位置の font 適用
+// テスト定義: docs/tests/cli-font.feature.md §`@font` 途中切替の波及範囲
+//
+// レンダリング後に SVG の font-family 属性を grep して確認する:
+//   - Block A の信号名 / @title / @-&gt; ラベル → &quot;Comic Neue&quot;
+//   - Block B の信号名 / @title / @-&gt; ラベル → &quot;Lobster Two&quot;
+@step 8
+@slant 2
+
+// --- Block A: Comic Neue ---
+@font &quot;Comic Neue&quot;
+
+@title Block A title
+
+ClockA  _~_~_~_~
+DataA   =====@{a1}X====@{a2}
+
+@-&gt; (@{a1}, @{a2}) arrow A
+
+// --- Block B: Lobster Two ---
+@font &quot;Lobster Two&quot;
+
+@title Block B title
+
+ClockB  _~_~_~_~
+DataB   =====@{b1}X====@{b2}
+
+@-&gt; (@{b1}, @{b2}) arrow B
+</tchart:source></metadata><style>.waveforms polyline { fill: none; stroke: black; }
+.guides line { stroke: red; }
+.highlights rect { fill: #ff8; }</style><g class="rulers" transform="translate(65.64,10)"><line x1="0" y1="0" x2="0" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="8" y1="0" x2="8" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="16" y1="0" x2="16" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="24" y1="0" x2="24" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="32" y1="0" x2="32" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="40" y1="0" x2="40" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="48" y1="0" x2="48" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="56" y1="0" x2="56" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="64" y1="0" x2="64" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="72" y1="0" x2="72" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="80" y1="0" x2="80" y2="140.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/></g><g class="signal-labels"><text x="57.64" y="45.8" font-family="&quot;Comic Neue&quot;" font-size="14" fill="#000000" text-anchor="end"><tspan x="57.64" dy="0">ClockA</tspan></text><text x="57.64" y="72.6" font-family="&quot;Comic Neue&quot;" font-size="14" fill="#000000" text-anchor="end"><tspan x="57.64" dy="0">DataA</tspan></text><text x="57.64" y="116.2" font-family="&quot;Lobster Two&quot;" font-size="14" fill="#000000" text-anchor="end"><tspan x="57.64" dy="0">ClockB</tspan></text><text x="57.64" y="143" font-family="&quot;Lobster Two&quot;" font-size="14" fill="#000000" text-anchor="end"><tspan x="57.64" dy="0">DataB</tspan></text></g><g class="waveforms"><polyline points="65.64,48.6 73.64,48.6 75.64,31.8 81.64,31.8 83.64,48.6 89.64,48.6 91.64,31.8 97.64,31.8 99.64,48.6 105.64,48.6 107.64,31.8 113.64,31.8 115.64,48.6 121.64,48.6 123.64,31.8 129.64,31.8"/><polyline points="65.64,75.4 105.64,75.4 107.64,58.6 145.64,58.6"/><polyline points="65.64,58.6 105.64,58.6 107.64,75.4 145.64,75.4"/><polyline points="65.64,119 73.64,119 75.64,102.2 81.64,102.2 83.64,119 89.64,119 91.64,102.2 97.64,102.2 99.64,119 105.64,119 107.64,102.2 113.64,102.2 115.64,119 121.64,119 123.64,102.2 129.64,102.2"/><polyline points="65.64,145.8 105.64,145.8 107.64,129 145.64,129"/><polyline points="65.64,129 105.64,129 107.64,145.8 145.64,145.8"/></g><g class="titles"><text x="77.82" y="24" font-family="&quot;Comic Neue&quot;" font-size="14" fill="#000000" text-anchor="middle"><tspan x="77.82" dy="0">Block A title</tspan></text><text x="77.82" y="94.4" font-family="&quot;Lobster Two&quot;" font-size="14" fill="#000000" text-anchor="middle"><tspan x="77.82" dy="0">Block B title</tspan></text></g><g class="arrows"><line x1="105.64" y1="67" x2="145.64" y2="67" stroke="#000000" stroke-width="1"/><path d="M145.64,67L139.64,70L139.64,64Z" fill="#000000"/><text x="125.64" y="63" font-family="&quot;Comic Neue&quot;" font-size="14" text-anchor="middle" paint-order="stroke fill" stroke="#ffffff" stroke-width="2" stroke-linejoin="round">arrow A</text><line x1="105.64" y1="137.4" x2="145.64" y2="137.4" stroke="#000000" stroke-width="1"/><path d="M145.64,137.4L139.64,140.4L139.64,134.4Z" fill="#000000"/><text x="125.64" y="133.4" font-family="&quot;Lobster Two&quot;" font-size="14" text-anchor="middle" paint-order="stroke fill" stroke="#ffffff" stroke-width="2" stroke-linejoin="round">arrow B</text></g></svg>

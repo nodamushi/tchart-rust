@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:tchart="http://tchart-rust/1.0" width="118.78" height="194.4" viewBox="0 0 118.78 194.4"><metadata><tchart:source>// @titlealign の center / left / right を網羅
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+@title &quot;Default Center Title&quot;
+
+A     _~_~_~_~
+
+@titlealign left
+@title &quot;Left Aligned&quot;
+
+B     _~_~_~_~
+
+@titlealign right
+@title &quot;Right Aligned&quot;
+
+C     _~_~_~_~
+
+@titlealign center
+@title &quot;Back to Center&quot;
+
+D     _~_~_~_~
+</tchart:source></metadata><style>.waveforms polyline { fill: none; stroke: black; }
+.guides line { stroke: red; }
+.highlights rect { fill: #ff8; }</style><g class="row-backgrounds"><rect x="10" y="26.8" width="98.78" height="26.8" fill="#f8f8ff"/><rect x="10" y="70.4" width="98.78" height="26.8" fill="#f0f0f0"/><rect x="10" y="114" width="98.78" height="26.8" fill="#f8f8ff"/><rect x="10" y="157.6" width="98.78" height="26.8" fill="#f0f0f0"/></g><g class="rulers" transform="translate(28.78,10)"><line x1="0" y1="0" x2="0" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="10" y1="0" x2="10" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="20" y1="0" x2="20" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="30" y1="0" x2="30" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="40" y1="0" x2="40" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="50" y1="0" x2="50" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="60" y1="0" x2="60" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="70" y1="0" x2="70" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="80" y1="0" x2="80" y2="174.4" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/></g><g class="signal-labels"><text x="20.78" y="45.8" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="20.78" dy="0">A</tspan></text><text x="20.78" y="89.4" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="20.78" dy="0">B</tspan></text><text x="20.78" y="133" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="20.78" dy="0">C</tspan></text><text x="20.78" y="176.6" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="20.78" dy="0">D</tspan></text></g><g class="waveforms"><polyline points="28.78,48.6 38.78,48.6 40.78,31.8 48.78,31.8 50.78,48.6 58.78,48.6 60.78,31.8 68.78,31.8 70.78,48.6 78.78,48.6 80.78,31.8 88.78,31.8 90.78,48.6 98.78,48.6 100.78,31.8 108.78,31.8"/><polyline points="28.78,92.2 38.78,92.2 40.78,75.4 48.78,75.4 50.78,92.2 58.78,92.2 60.78,75.4 68.78,75.4 70.78,92.2 78.78,92.2 80.78,75.4 88.78,75.4 90.78,92.2 98.78,92.2 100.78,75.4 108.78,75.4"/><polyline points="28.78,135.8 38.78,135.8 40.78,119 48.78,119 50.78,135.8 58.78,135.8 60.78,119 68.78,119 70.78,135.8 78.78,135.8 80.78,119 88.78,119 90.78,135.8 98.78,135.8 100.78,119 108.78,119"/><polyline points="28.78,179.4 38.78,179.4 40.78,162.6 48.78,162.6 50.78,179.4 58.78,179.4 60.78,162.6 68.78,162.6 70.78,179.4 78.78,179.4 80.78,162.6 88.78,162.6 90.78,179.4 98.78,179.4 100.78,162.6 108.78,162.6"/></g><g class="titles"><text x="59.39" y="24" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="middle"><tspan x="59.39" dy="0">Default Center Title</tspan></text><text x="20" y="67.6" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="start"><tspan x="20" dy="0">Left Aligned</tspan></text><text x="98.78" y="111.2" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="98.78" dy="0">Right Aligned</tspan></text><text x="59.39" y="154.8" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="middle"><tspan x="59.39" dy="0">Back to Center</tspan></text></g></svg>

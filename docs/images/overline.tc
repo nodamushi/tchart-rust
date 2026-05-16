@@ -1,0 +1,21 @@
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+@signal(overline)
+nReset    ~~~~__~~~~
+
+@signal(overline)
+hoge    ~~~~__~~~~
+
+@signal(overline)
+nWrite    ~~__~~__~~
+
+Enable    ____~~~~____
+
+@signal(overline)
+"nChip
+Enable"   ~~~~____~~~~
+
+Out       __~~~~____~~

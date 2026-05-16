@@ -1,0 +1,19 @@
+{
+  "id": "playwright-mcp",
+  "version": "0.2.0",
+  "name": "Playwright MCP",
+  "description": "Installs Playwright browser binaries and system dependencies so AI agents can drive @playwright/mcp inside the dev container.",
+  "options": {
+    "browser": {
+      "type": "string",
+      "enum": ["chromium", "firefox", "webkit"],
+      "default": "chromium",
+      "description": "Which browser to install for Playwright."
+    }
+  },
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/node",
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/anthropics/devcontainer-features/claude-code"
+  ]
+}

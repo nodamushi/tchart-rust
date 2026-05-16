@@ -1,0 +1,19 @@
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+@title Synchronous Circuit
+
+Clock   _~_~_~_~_~_~
+Data    =====X====
+
+@title "Read Sequence"
+
+Req     ____~~~~____
+Ack     _______~~~~_
+
+@title "Multi-line
+Title Example"
+
+Bus     =====X====

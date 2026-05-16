@@ -1,0 +1,11 @@
+// クロック同期回路のサンプル
+@step 8
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+Clock   _~_~_~_~_~_~
+"Data
+-Data"    =====X====X====
+Enable  ____~~~~____
+Output  _______~~~~~____

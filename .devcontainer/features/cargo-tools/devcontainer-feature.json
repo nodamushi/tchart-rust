@@ -1,0 +1,6 @@
+{
+  "id": "cargo-tools",
+  "version": "1.0.0",
+  "name": "Custom Cargo Tools",
+  "description": "Installs cargo tools"
+}

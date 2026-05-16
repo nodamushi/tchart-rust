@@ -1,0 +1,18 @@
+// Multi-line signal names and per-signal backgrounds
+@fontsize 14
+@step 8
+@slant 2
+
+@bg #f8f8ff
+Clock _~_~_~_~_~_~
+@bg #f0f0f0
+"Data
+Bus" =====X====X====
+@bg #f8f8ff
+Enable ____~~~~____
+@bg #f0f0f0
+"Control
+Signal
+Out" _______~~~~~____
+@bg #f8f8ff
+HiZ ----~~~~----

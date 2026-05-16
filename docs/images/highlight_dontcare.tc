@@ -1,0 +1,31 @@
+// 不定値 (?) とハイライト ([]) と信号背景 (@bg) の目視確認用
+// `@dontcare_color` を行の途中で切り替えることで、行ごとにハッチ色が変わることも確認する。
+@fontsize 14
+@step 10
+@slant 2
+
+// 不定値の連続と単独 (`?` は直前レベル必須 — `tcml-format.md` §`?` のエラー条件)
+// まずデフォルト色 (#bbb)
+NotCare1   _??======
+NotCare2   _??_~~~~
+
+// ハイライト区間
+@highlight_style fill="#ff8" stroke="none"
+Hi_Default  _~_~[_~_~]_~_~
+
+@highlight_style fill="#8f8" stroke="green" stroke-width="0.8"
+Hi_Custom   ====[=====]====
+
+// 不定値の色を赤に切り替え
+@dontcare_color #c00
+Hi_NotCare  ~~~~??____
+
+// 信号背景 (@bg は次の信号にのみ適用)
+@bg #e8f4e8
+BgGreen     _~_~_~_~
+@bg #f4e8e8
+BgRed       =====X====
+
+// 不定値の色を青に切り替え (デフォルト #bbb / 赤 #c00 / 青 #06c の 3 色を使う)
+@dontcare_color #06c
+NoBg        __??~~~~____

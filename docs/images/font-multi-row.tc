@@ -1,0 +1,15 @@
+// 同一 family を多数行で繰り返す。多重読込み禁止 (load 1 回) の検証用
+@step 8
+@slant 2
+@font "Comic Neue"
+
+Clock0  _~_~_~_~
+Clock1  _~_~_~_~
+Clock2  _~_~_~_~
+Clock3  _~_~_~_~
+Clock4  _~_~_~_~
+Clock5  _~_~_~_~
+Clock6  _~_~_~_~
+Clock7  _~_~_~_~
+Clock8  _~_~_~_~
+Clock9  _~_~_~_~

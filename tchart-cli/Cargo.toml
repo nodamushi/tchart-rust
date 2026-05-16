@@ -1,0 +1,32 @@
+[package]
+name = "tchart-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tchart_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tchart"
+path = "src/main.rs"
+
+[dependencies]
+tchart-core = { path = "../tchart-core" }
+thiserror = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+fontdue = "0.9"
+resvg = "0.44"
+tiny-skia = "0.11"
+usvg = "0.44"
+fontdb = "0.22"
+png = "0.17"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = { workspace = true }
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

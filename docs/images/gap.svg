@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:tchart="http://tchart-rust/1.0" width="206.688" height="180.8" viewBox="0 0 206.688 180.8"><metadata><tchart:source>// Gap (&apos;:&apos;) パターン確認サンプル
+// `:` で信号が視覚的に切断されることを確認する
+@step 10
+@slant 2
+
+// --- 異なるレベル間の Gap ---
+GapLoHi    ____:~~~~
+GapHiLo    ~~~~:____
+GapHiZLo   ----:____
+GapBusHi   =====:~~~~
+
+// --- 同レベルでの Gap ---
+GapLoLo    ____:____
+GapBus     =====:=====
+</tchart:source></metadata><style>.waveforms polyline { fill: none; stroke: black; }
+.guides line { stroke: red; }
+.highlights rect { fill: #ff8; }</style><g class="rulers" transform="translate(86.688,10)"><line x1="0" y1="0" x2="0" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="10" y1="0" x2="10" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="20" y1="0" x2="20" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="30" y1="0" x2="30" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="40" y1="0" x2="40" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="50" y1="0" x2="50" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="60" y1="0" x2="60" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="70" y1="0" x2="70" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="80" y1="0" x2="80" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="90" y1="0" x2="90" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/><line x1="100" y1="0" x2="100" y2="160.8" stroke="#a0a0a0" stroke-width="0.5" stroke-dasharray="3 5"/></g><g class="signal-labels"><text x="78.688" y="29" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="78.688" dy="0">GapLoHi</tspan></text><text x="78.688" y="55.8" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="78.688" dy="0">GapHiLo</tspan></text><text x="78.688" y="82.6" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="78.688" dy="0">GapHiZLo</tspan></text><text x="78.688" y="109.4" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="78.688" dy="0">GapBusHi</tspan></text><text x="78.688" y="136.2" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="78.688" dy="0">GapLoLo</tspan></text><text x="78.688" y="163" font-family="sans-serif" font-size="14" fill="#000000" text-anchor="end"><tspan x="78.688" dy="0">GapBus</tspan></text></g><g class="waveforms"><polyline points="86.688,31.8 126.688,31.8"/><polyline points="136.688,31.8 138.688,15 176.688,15"/><polyline points="86.688,41.8 126.688,41.8"/><polyline points="136.688,41.8 138.688,58.6 176.688,58.6"/><polyline points="86.688,77 126.688,77" stroke-dasharray="4 2"/><polyline points="138.688,85.4 176.688,85.4"/><polyline points="136.688,77 138.688,85.4" stroke-dasharray="4 2"/><polyline points="86.688,95.4 136.688,95.4"/><polyline points="86.688,112.2 136.688,112.2"/><polyline points="146.688,95.4 148.688,95.4 186.688,95.4"/><polyline points="146.688,112.2 148.688,95.4"/><polyline points="86.688,139 126.688,139"/><polyline points="136.688,139 176.688,139"/><polyline points="86.688,149 136.688,149"/><polyline points="86.688,165.8 136.688,165.8"/><polyline points="146.688,149 196.688,149"/><polyline points="146.688,165.8 196.688,165.8"/></g></svg>

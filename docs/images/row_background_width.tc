@@ -1,0 +1,10 @@
+// 信号長がバラバラでも row-background はチャート全幅で揃うことを確認するサンプル
+@step 10
+@slant 2
+@bgcolor0 #fde
+@bgcolor1 #def
+
+Long      _~_~_~_~_~_~_~_~
+Short     _~_~
+Mid       _~_~_~_~_~
+VeryShort _

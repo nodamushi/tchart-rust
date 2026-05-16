@@ -1,0 +1,12 @@
+{
+  "name": "Rust + Claude Code",
+  "image": "mcr.microsoft.com/devcontainers/rust:latest",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {},
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+    "./features/cargo-tools": {},
+    "./features/playwright-mcp": {}
+  },
+  "remoteUser": "vscode"
+}

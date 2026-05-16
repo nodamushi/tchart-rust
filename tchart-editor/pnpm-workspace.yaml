@@ -1,0 +1,8 @@
+allowBuilds:
+  '@swc/core': true
+  esbuild: true
+minimumReleaseAge: 1440
+overrides:
+  happy-dom@<20.0.0: '>=20.0.0'
+  happy-dom@<20.8.9: '>=20.8.9'
+  happy-dom@>=15.10.0 <=20.8.7: '>=20.8.8'

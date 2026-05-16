@@ -1,0 +1,22 @@
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+Clock   _~_~_~_~_~_~
+
+@skip(1)
+
+Data    =====X====
+
+@skip(2)
+
+Control ____~~~~____
+
+@skip(0.5)
+
+Flag    ~~____~~____
+
+@skip(20px)
+
+Out     _~~~~___~~~~

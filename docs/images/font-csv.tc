@@ -1,0 +1,8 @@
+// CSV 指定。最初の "NoSuchFont" は解決失敗、2 番目以降のいずれかが解決される
+@step 8
+@slant 2
+@font "NoSuchFont, Lobster Two, sans-serif"
+
+Clock   _~_~_~_~
+Data    _~~__~~_
+Enable  ____~~~~
