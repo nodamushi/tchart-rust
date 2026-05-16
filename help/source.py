@@ -952,6 +952,74 @@ Enable ____~~~~________
                 },
             ],
         },
+        {
+            "id": "cli",
+            "num": 20,
+            "title": "コマンドライン版 (CLI)",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": (
+                        "<p>本ツールには Web エディタの他に <code>tchart</code> CLI 版があり、複数ファイルの一括変換や CI / スクリプトからの自動実行に利用できます。"
+                        "最新バイナリは <a href=\"https://github.com/nodamushi/tchart-rust/releases\">GitHub Releases</a> から取得できます (Linux x86_64 / Windows x86_64)。</p>"
+                    ),
+                },
+                {
+                    "type": "text",
+                    "content": "<p>サブコマンド:</p>",
+                },
+                {
+                    "type": "code",
+                    "code": (
+                        "tchart svg      <INPUT>                          # TCML を SVG にレンダリング\n"
+                        "tchart png      <INPUT>                          # TCML を PNG にレンダリング\n"
+                        "tchart src      <SVG_OR_PNG>                     # 埋め込み TCML を抽出\n"
+                        "tchart wavedrom <INPUT>                          # TCML を WaveDrom JSON に変換\n"
+                        "tchart batch    <svg|png> <INPUT>... -o <DIR>    # 複数ファイルの一括変換\n"
+                    ),
+                },
+                {
+                    "type": "text",
+                    "content": "<p>実行例:</p>",
+                },
+                {
+                    "type": "code",
+                    "code": (
+                        "tchart svg chart.tc                    # → 入力の隣に chart.svg を出力\n"
+                        "tchart png chart.tc -o out.png         # 出力先を明示\n"
+                        "tchart svg chart.tc --font-size 14     # フォントサイズを変更\n"
+                        "tchart src chart.png -o -              # 埋め込み TCML を標準出力へ\n"
+                        "tchart batch svg samples/*.tc -o out/  # 一括変換\n"
+                    ),
+                },
+                {
+                    "type": "text",
+                    "content": "<p>主なオプション:</p>",
+                },
+                {
+                    "type": "table",
+                    "headers": ["フラグ", "説明", "デフォルト"],
+                    "rows": [
+                        [
+                            "<code>-o, --output &lt;PATH&gt;</code>",
+                            "出力先パス (<code>batch</code> ではディレクトリ)",
+                            "入力ファイルの隣",
+                        ],
+                        [
+                            "<code>--font &lt;FILE&gt;</code>",
+                            "デフォルトフォントファイル",
+                            "システムフォント自動検出",
+                        ],
+                        [
+                            "<code>--font-size &lt;SIZE&gt;</code>",
+                            "フォントサイズ (px, <code>&gt; 0</code>)",
+                            "<code>12.0</code>",
+                        ],
+                        ["<code>-h, --help</code>", "ヘルプ表示", ""],
+                    ],
+                },
+            ],
+        },
     ],
 }
 
@@ -1851,6 +1919,74 @@ Enable ____~~~~________
                     ),
                     "tcml_svg_file": "tcml-demo-arrow.svg",
                     "wavedrom_svg_file": "wavedrom-demo-arrow.svg",
+                },
+            ],
+        },
+        {
+            "id": "cli",
+            "num": 20,
+            "title": "Command-line version (CLI)",
+            "blocks": [
+                {
+                    "type": "text",
+                    "content": (
+                        "<p>In addition to the web editor, the project ships a <code>tchart</code> CLI binary that is convenient for batch conversion of multiple files and for use from CI / scripts. "
+                        "Prebuilt binaries (Linux x86_64 / Windows x86_64) are available on the <a href=\"https://github.com/nodamushi/tchart-rust/releases\">GitHub Releases</a> page.</p>"
+                    ),
+                },
+                {
+                    "type": "text",
+                    "content": "<p>Subcommands:</p>",
+                },
+                {
+                    "type": "code",
+                    "code": (
+                        "tchart svg      <INPUT>                          # render TCML to SVG\n"
+                        "tchart png      <INPUT>                          # render TCML to PNG\n"
+                        "tchart src      <SVG_OR_PNG>                     # extract embedded TCML\n"
+                        "tchart wavedrom <INPUT>                          # convert TCML to WaveDrom JSON\n"
+                        "tchart batch    <svg|png> <INPUT>... -o <DIR>    # process multiple files\n"
+                    ),
+                },
+                {
+                    "type": "text",
+                    "content": "<p>Examples:</p>",
+                },
+                {
+                    "type": "code",
+                    "code": (
+                        "tchart svg chart.tc                    # → chart.svg next to input\n"
+                        "tchart png chart.tc -o out.png         # explicit output path\n"
+                        "tchart svg chart.tc --font-size 14     # custom font size\n"
+                        "tchart src chart.png -o -              # extract embedded TCML to stdout\n"
+                        "tchart batch svg samples/*.tc -o out/  # batch convert\n"
+                    ),
+                },
+                {
+                    "type": "text",
+                    "content": "<p>Common options:</p>",
+                },
+                {
+                    "type": "table",
+                    "headers": ["Flag", "Description", "Default"],
+                    "rows": [
+                        [
+                            "<code>-o, --output &lt;PATH&gt;</code>",
+                            "Output file (for <code>batch</code>, output directory)",
+                            "next to input",
+                        ],
+                        [
+                            "<code>--font &lt;FILE&gt;</code>",
+                            "Default font file",
+                            "system font auto-detect",
+                        ],
+                        [
+                            "<code>--font-size &lt;SIZE&gt;</code>",
+                            "Font size in px (<code>&gt; 0</code>)",
+                            "<code>12.0</code>",
+                        ],
+                        ["<code>-h, --help</code>", "Help", ""],
+                    ],
                 },
             ],
         },

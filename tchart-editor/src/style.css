@@ -66,6 +66,14 @@ body {
   text-overflow: ellipsis;
 }
 
+.toolbar-version {
+  margin-left: 6px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6b7280;
+}
+
 .toolbar button {
   display: inline-flex;
   align-items: center;

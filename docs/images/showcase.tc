@@ -1,0 +1,13 @@
+@title Request / Acknowledge handshake
+@slant 0
+
+@clock(pos)
+clk
+
+request      ___@{r}~~~~~~~~@1____
+acknowledge  _____@{a}~~________
+ready        _____~~~~~~~~@2__
+data_bus     =?====X==DATA=====X?=
+
+@-> (@{r}, @{a}) req → ack
+@-> (@1, @2, red)
