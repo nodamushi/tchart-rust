@@ -1,0 +1,93 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen CLI
+        run: |
+          curl -fsSL https://github.com/rustwasm/wasm-bindgen/releases/download/0.2.121/wasm-bindgen-0.2.121-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz --strip-components=1 -C /usr/local/bin wasm-bindgen-0.2.121-x86_64-unknown-linux-musl/wasm-bindgen
+          wasm-bindgen --version
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: tchart-editor/pnpm-lock.yaml
+
+      - name: Build tchart CLI (used by help/build.py)
+        run: cargo build --bin tchart
+
+      - name: Generate help HTML (ja + en)
+        run: python3 help/build.py
+
+      - name: Build tchart-web wasm package
+        run: node tchart-editor/scripts/build-wasm-pkg.mjs
+
+      - name: Install editor dependencies
+        working-directory: tchart-editor
+        run: pnpm install --frozen-lockfile
+
+      - name: Build editor (single-file HTML)
+        working-directory: tchart-editor
+        run: pnpm build
+
+      - name: Stage Pages artifact (editor + standalone help)
+        run: |
+          mkdir -p dist-pages/help
+          cp tchart-editor/dist/index.html dist-pages/index.html
+          cp help/output/tcml-format.html dist-pages/help/tcml-format.html
+          cp help/output/tcml-format.en.html dist-pages/help/tcml-format.en.html
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

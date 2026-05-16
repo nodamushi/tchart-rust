@@ -1,0 +1,29 @@
+// @font 途中切替の波及範囲確認
+// 仕様: docs/spec/tcml-format.md §ローカルパラメータ + §`@->` 行記述位置の font 適用
+// テスト定義: docs/tests/cli-font.feature.md §`@font` 途中切替の波及範囲
+//
+// レンダリング後に SVG の font-family 属性を grep して確認する:
+//   - Block A の信号名 / @title / @-> ラベル → "Comic Neue"
+//   - Block B の信号名 / @title / @-> ラベル → "Lobster Two"
+@step 8
+@slant 2
+
+// --- Block A: Comic Neue ---
+@font "Comic Neue"
+
+@title Block A title
+
+ClockA  _~_~_~_~
+DataA   =====@{a1}X====@{a2}
+
+@-> (@{a1}, @{a2}) arrow A
+
+// --- Block B: Lobster Two ---
+@font "Lobster Two"
+
+@title Block B title
+
+ClockB  _~_~_~_~
+DataB   =====@{b1}X====@{b2}
+
+@-> (@{b1}, @{b2}) arrow B

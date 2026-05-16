@@ -1,0 +1,61 @@
+{
+  "env": {
+    "ENABLE_LSP_TOOL": "1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "DISABLE_FEEDBACK_COMMAND": "1"
+  },
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Read(**.env)",
+      "Bash(sudo:*)",
+      "Bash(su:*)",
+      "Bash(apt:*)",
+      "Bash(apt-get:*)",
+      "Bash(snap:*)",
+      "Bash(nala:*)",
+      "Bash(yum:*)",
+      "Bash(brew:*)",
+      "Bash(cargo install:*)",
+      "Bash(pnpm install -g:*)",
+      "Bash(pnpm install --global:*)",
+      "Bash(npm:*)",
+      "Bash(burn:*)",
+      "Bash(pipx:*)",
+      "Read(id_rsa)",
+      "Read(id_ed25519)",
+      "Read(**/*token*)",
+      "Read(**/*key*)",
+      "Write(.env*)",
+      "Write(**/secrets/**)",
+      "Bash(git config:*)"
+    ],
+    "ask": [
+      "Bash(rm:*)",
+      "Bash(rm -rf:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(git merge:*)",
+      "Bash(git checkout develop)",
+      "Bash(git checkout main)",
+      "Bash(gh:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "scripts/precommit-check.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

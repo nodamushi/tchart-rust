@@ -1,0 +1,23 @@
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+Req     ___@{s}~~~~@{e}___
+Ack     _______@{a}~~~~
+
+@-> (@{s}, @{a}) request
+@-> (@{e}, @{a}, dashed) ack
+
+Bus     =====@1X====@2X====@3
+Flag    ____@4~~~~@5___
+
+@-> (@1, @4, red, 2px) A
+@-> (@2, @5, blue, head=both) B
+@-> (@3, @4, green, dotted) forward ref
+
+Data    __@{d1}~~~~@{d2}___
+Out     ___@{o1}~~~~@{o2}__
+
+@-> (@{d1}, @{o1}, #ff8800, solid) start
+@-> (@{d2}, @{o2}, dashed, head=none) end

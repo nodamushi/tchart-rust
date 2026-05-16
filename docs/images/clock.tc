@@ -1,0 +1,24 @@
+@step 8
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+@clock(pos)
+ClkPos   _~_~_~_~_~_~
+
+@clock(neg)
+ClkNeg   _~_~_~_~_~_~
+
+@clock(both)
+ClkBoth  _~_~_~_~_~_~
+
+@clock(none)
+ClkNone  _~_~_~_~_~_~
+
+Data     =====X====X====
+
+@clock(pos, _=2, ~=1)
+ClkWide
+
+@clock(both, start=high)
+ClkHigh

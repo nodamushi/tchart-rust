@@ -1,0 +1,30 @@
+[workspace]
+members = ["tchart-core", "tchart-cli", "tchart-web"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "0BSD"
+
+[workspace.dependencies]
+thiserror = "2.0"
+serde_json = "1"
+
+[workspace.lints.clippy]
+too_many_lines = "deny"
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
+unused_result_ok = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+exit = "deny"
+
+[profile.cli-release]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+panic = "unwind"

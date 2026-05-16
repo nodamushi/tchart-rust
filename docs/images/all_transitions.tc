@@ -1,0 +1,41 @@
+// 全遷移パターン確認サンプル (遷移のみ)
+// Low / High / HiZ / Bus 間の直接遷移および X 記号経由遷移を網羅する
+@step 10
+@slant 2
+
+// --- Low / High / HiZ 間の直接遷移 (6パターン) ---
+Lo2Hi      ____~~~~
+Hi2Lo      ~~~~____
+Lo2HiZ     ____----
+Hi2HiZ     ~~~~----
+HiZ2Lo     ----____
+HiZ2Hi     ----~~~~
+
+// --- Low / High / HiZ <-> Bus 直接遷移 (6パターン) ---
+Lo2Bus     ____====
+Hi2Bus     ~~~~====
+HiZ2Bus    ----====
+Bus2Lo     ====____
+Bus2Hi     ====~~~~
+Bus2HiZ    ====----
+
+// --- X 記号: Bus <-> Bus (クロスハッチ) ---
+BusBusX    =====X=====
+
+// --- X 記号: Low / High / HiZ -> Bus (3パターン) ---
+Lo2BusX    _____X=====
+Hi2BusX    ~~~~~X=====
+HiZ2BusX   -----X=====
+
+// --- X 記号: Bus -> Low / High / HiZ (3パターン) ---
+Bus2LoX    =====X_____
+Bus2HiX    =====X~~~~~
+Bus2HiZX   =====X-----
+
+// --- X 記号: Low / High / HiZ 間 (6パターン) ---
+Lo2HiX     _____X~~~~~
+Hi2LoX     ~~~~~X_____
+Lo2HiZX    _____X-----
+HiZ2LoX    -----X_____
+Hi2HiZX    ~~~~~X-----
+HiZ2HiX    -----X~~~~~

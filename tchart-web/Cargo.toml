@@ -1,0 +1,22 @@
+[package]
+name = "tchart-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tchart-core = { path = "../tchart-core" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+png = "0.17"
+
+[dependencies.web-sys]
+version = "0.3"
+features = ["CanvasRenderingContext2d", "HtmlCanvasElement", "Window", "Document", "TextMetrics", "Element"]
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+serde_json = { workspace = true }

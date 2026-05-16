@@ -1,0 +1,8 @@
+// CSS ジェネリックのみ指定。OS 解決経路 (fc-match 等) に通る確認用
+@step 8
+@slant 2
+@font monospace
+
+Clock   _~_~_~_~
+Data    _~~__~~_
+Enable  ____~~~~

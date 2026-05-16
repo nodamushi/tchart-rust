@@ -1,0 +1,27 @@
+// 信号ごとの step / slant 切り替え (非同期クロック) 目視確認用
+@fontsize 14
+@slant 2
+
+// 高速クロック
+@step 6
+ClkFast   _~_~_~_~_~_~_~_~
+
+// 中速クロック
+@step 10
+ClkMid    _~_~_~_~_~
+
+// 低速クロック (slant 0 で立ち上がりを垂直に)
+@step 16
+@slant 0
+ClkSlow   _~_~_~
+
+// Slant 戻して色とラインを変える
+@slant 2
+@signal_color blue
+@signal_width 1.5
+DataBlue  =====X====
+
+@signal_color #c44
+@guide_color green
+@guide_width 1
+DataRed   ____|~~~~|____

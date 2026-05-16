@@ -1,0 +1,7 @@
+@title バスラベル中央寄せ
+@step 10
+@slant 2
+
+clk    ~_~_~_~_
+addr   =A=B=C=D=E=F=G=H
+en     __~~~~__

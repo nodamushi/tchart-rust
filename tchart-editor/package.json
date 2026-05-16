@@ -1,0 +1,51 @@
+{
+  "name": "tchart-editor",
+  "version": "0.1.0",
+  "private": true,
+  "license": "0BSD",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "pnpm run regen:wasm && tsc -p tsconfig.build.json && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "fmt": "oxfmt src",
+    "lint": "oxlint src",
+    "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck && pnpm lint && oxfmt --check src",
+    "clean": "rm -rf node_modules dist ../tchart-web/pkg",
+    "verify:clean-build": "pnpm clean && node scripts/build-wasm-pkg.mjs && pnpm install --frozen-lockfile && pnpm build",
+    "regen:wasm": "node scripts/build-wasm-pkg.mjs",
+    "regen:help": "python3 ../help/build.py"
+  },
+  "dependencies": {
+    "@webcoder49/code-input": "^2.8.2",
+    "prismjs": "^1.30.0",
+    "tchart-web": "file:../tchart-web/pkg"
+  },
+  "devDependencies": {
+    "@types/prismjs": "^1.26.6",
+    "happy-dom": "^17.4.4",
+    "oxfmt": "^0.45.0",
+    "oxlint": "^1.60.0",
+    "oxlint-tsgolint": "^0.21.1",
+    "typescript": "^5.7.0",
+    "vite": "^6.3.0",
+    "vite-plugin-singlefile": "^2.3.3",
+    "vite-plugin-top-level-await": "^1.5.0",
+    "vite-plugin-wasm": "^3.4.1",
+    "vitest": "^3.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@swc/core"
+    ],
+    "overrides": {
+      "happy-dom@<20.0.0": ">=20.0.0",
+      "happy-dom@<20.8.9": ">=20.8.9",
+      "happy-dom@>=15.10.0 <=20.8.7": ">=20.8.8"
+    }
+  }
+}

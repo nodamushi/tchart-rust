@@ -1,0 +1,36 @@
+// クロック三角形マーカーのサイズ・位置・色のグローバル/個別設定確認サンプル
+@step 10
+@slant 2
+@bgcolor0 #f8f8ff
+@bgcolor1 #f0f0f0
+
+// デフォルト (h=5, w=4, pos=0.5, color=signal_color)
+@clock(pos)
+DefaultPos   _~_~_~_~_~_~
+
+// pos=0.0 (頂点が線根元から height だけ進んだ位置)
+@clockmark_position 0.0
+@clock(pos)
+PosZero      _~_~_~_~_~_~
+
+// pos=1.0 (頂点が線先端)
+@clockmark_position 1.0
+@clock(pos)
+PosOne       _~_~_~_~_~_~
+
+// 戻して大きめ・色付き
+@clockmark_position 0.5
+@clockmark_height 8
+@clockmark_width  6
+@clockmark_color  red
+@clock(pos)
+BigRed       _~_~_~_~_~_~
+
+// 個別オプションでグローバル上書き (height のみ青で 3px)
+@clock(pos, mark_height=3, mark_color=blue)
+SmallBlue    _~_~_~_~_~_~
+
+// slant=0 (垂直エッジ)
+@slant 0
+@clock(both)
+Vertical     _~_~_~_~_~_~
