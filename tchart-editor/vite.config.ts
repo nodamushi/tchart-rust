@@ -1,8 +1,14 @@
 /// <reference types="vitest" />
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { viteSingleFile } from "vite-plugin-singlefile";
+
+const pkg = JSON.parse(
+  readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf-8"),
+);
 
 function stripModuleScript(): Plugin {
   return {
@@ -17,6 +23,9 @@ function stripModuleScript(): Plugin {
 
 export default defineConfig({
   base: "./",
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [wasm(), topLevelAwait(), viteSingleFile(), stripModuleScript()],
   build: {
     assetsInlineLimit: 100 * 1024 * 1024,

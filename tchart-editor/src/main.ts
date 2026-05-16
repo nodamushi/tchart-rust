@@ -52,6 +52,9 @@ function start(): void {
   const privacyNote = requireElement("privacy-note", HTMLElement);
   privacyNote.textContent = detectUiLang() === "ja" ? PRIVACY_JA : PRIVACY_EN;
 
+  const appVersion = requireElement("app-version", HTMLElement);
+  appVersion.textContent = `v${__APP_VERSION__}`;
+
   const buttons: OutputButtons = {
     saveSvg: saveSvgBtn,
     savePng: savePngBtn,
