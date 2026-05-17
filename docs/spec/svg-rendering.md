@@ -238,37 +238,45 @@ SVG 出力 (1 本ぶん):
 
 #### `LevelRun(DontCareAlong*)` — `?`
 
-`<g class="dontcares">` レイヤに **塗り潰し矩形**を出力 + `<g class="waveforms">` レイヤに **内部の水平線**を出力。
+`<g class="dontcares">` レイヤに **塗り polygon** を出力 + `<g class="waveforms">` レイヤに **内部の水平線** (および隣接遷移の slant) を出力。
 
-| Variant | 塗り y 範囲 | 内部水平線 |
-|---------|-------------|-----------|
-| `DontCareAlongLow`  | `signal_box` 全高 | y_low に 1 本 |
-| `DontCareAlongHigh` | `signal_box` 全高 | y_high に 1 本 |
-| `DontCareAlongHiZ`  | `signal_box` 全高 | y_mid に 1 本 (HiZ スタイル: 破線) |
-| `DontCareAlongBus`  | y_high〜y_low の範囲。前後の波形に応じて左右の辺が斜辺に追従 (下記) | y_high と y_low に 2 本 |
+| Variant | 塗り y 範囲 | 内部水平線 | 左右辺が斜辺追従するか |
+|---------|-------------|-----------|------------------------|
+| `DontCareAlongLow`  | `y_high`〜`y_low` | y_low に 1 本 | する (下記 `DontCareAlongLow / High / Bus の塗り形状`) |
+| `DontCareAlongHigh` | `y_high`〜`y_low` | y_high に 1 本 | する (同上) |
+| `DontCareAlongHiZ`  | `y_high`〜`y_low` | y_mid に 1 本 (HiZ スタイル: 破線) | **しない** (常に矩形、下記 `DontCareAlongHiZ の塗り形状`) |
+| `DontCareAlongBus`  | `y_high`〜`y_low` | y_high と y_low に 2 本 | する (同上) |
 
-- `<rect>` / `<polygon>` の `fill` は **常に** その行のハッチ色に対応する `url(#dontcare-hatch-N)` (`<defs>` のいずれかのパターンへの参照)。それ以外の属性は出力しない (アウトラインなし)。
+- DC polygon の上辺 y は **常に y_high**、下辺 y は **常に y_low**。`signal_box` 全高にはみ出してはいけない (旧仕様 「`signal_box` 全高」は撤廃)。
+- `<polygon>` の `fill` は **常に** その行のハッチ色に対応する `url(#dontcare-hatch-N)` (`<defs>` のいずれかのパターンへの参照)。それ以外の属性は出力しない (アウトラインなし)。
 - `@dontcare_color` の値は `<defs>` の対応する `<pattern>` 内 `<line stroke>` に焼き込まれる。同色は `<defs>` 内で 1 つのパターンに統合される (ID 共有)。
 - `@dontcare_color` をチャート途中で書き直すと、それ以降の行のハッチ色が切り替わる (`<defs>` には新色のパターンが追加され、ID が割り当てられる)。
 - チャートに `?` が 1 つでも存在すれば `<defs>` は常に出力する。
 - 内部水平線は **直前の polyline と連結**する (Single の場合は単一蓄積器に push、Bus の場合は上下蓄積器に push)。
-- Single 系の矩形端 (左右の垂直辺) には遷移 (`slant` 幅) が挿入されないため、矩形通過後 polyline は flush せず**継続**できる (内部水平線が次の LevelRun と直接接続)。
+- DC 区間の左右垂直辺には固有の遷移 `slant` 幅は挿入されない。ただし **DC の隣接遷移 (SingleEdge / BusOpen / BusClose / BusCross / Pos-half / Neg-half) は `?` の有無に関わらず `@slant` どおりに描画される** (`?` がレベル列に存在しても 0 (垂直) に縮退してはならない)。
 
-##### `DontCareAlongBus` の塗り形状
+##### `DontCareAlongLow` / `DontCareAlongHigh` / `DontCareAlongBus` の塗り形状
 
-塗り範囲は **前後の波形要素が `?` の左右に張る境界線で囲まれた範囲**。`signal_box` 全高ではみ出してはいけない。出力は `<polygon>` (4 点)。
+塗り範囲は **前後の波形要素が `?` の左右に張る境界線で囲まれた範囲**。出力は `<polygon>` (4〜6 点)。上辺 y_high、下辺 y_low。左右辺は **隣接遷移の斜辺 / 中継頂点** に追従する。
 
-- 上辺は y_high で水平、下辺は y_low で水平 (`?` 中の Bus 内部水平線と一致)。
-- 左辺は **直前の波形→`?` の遷移境界**に追従:
-  - 前要素が Bus continue (`=?`) → 垂直 (x = `?` 開始 x、y_high〜y_low)
-  - 前要素が Low/High/HiZ (`_=?` / `~=?` / `-=?`) → 前要素 → Bus 遷移の斜辺に一致 (slant>0 で 1 点に縮退)
-- 右辺は **`?` → 直後の波形 の遷移境界** に追従 (左辺と対称)。
-- 結果の概略形状:
-  - `=?=` (両側 Bus continue): 矩形
-  - `_=?=_`: `/=\` (左下と右下が `?` 端、左上と右上が前後遷移端)
-  - `~=?=~`: `\=/`
-  - `=?_` / `_?=` 等の片側のみ遷移パターンも同様に該当辺のみ斜辺
-- 条件分岐は前要素 4 種 (Bus continue / Low / High / HiZ) × 後要素 4 種 = 16 通りすべてを網羅すること。サボって「Bus continue 以外は同じ斜辺」みたいな手抜き禁止。
+- DC の左端 x を `x_a`、右端 x を `x_b`、`@slant` を `s` とする。`y_h` / `y_mid` / `y_l` は signal_box の上端 / 中央 / 下端。
+- 隣接遷移は次のように分類:
+  - **Single full slant** — Low/High 間の遷移 (`_~` Pos、`~_` Neg)。Single ↔ Bus 開閉も含む (`_=`, `~=`, `=_`, `=~`)。
+  - **Half slant** — HiZ を経由する Low/High ↔ HiZ 遷移 (`_-`, `-_`, `~-`, `-~`、および BusOpen-from-HiZ `-=`, BusClose-to-HiZ `=-`)。HiZ 側で **`y_mid` を中継頂点**として polygon に追加する (1 個)。
+  - **BusCross** — `=X` / `X=`。X の cross 中点 `(x_cross + s/2, y_mid)` が polygon の wedge 頂点 (`>▲▲<` 形)。
+  - **垂直境界** — 信号行頭 / 行末 / Gap / 同レベル continue (`=?=` の `=`、`_?_` の `_` 等)。
+
+- 各 DC variant の **左右境界 4 通り (start / Pos 系 / half / BusClose 系)** × **4 通り (end / Neg 系 / half / BusOpen 系)** = 16 組合せをすべて網羅すること。サボって「同じ斜辺」みたいな手抜き禁止。具体ケース表は `docs/tests/svg-rendering.feature.md` §「`#1`」参照。
+
+- 内部水平線 (`y_low` / `y_high` / Bus 上下) は **DC 区間の x 範囲 (`x_a` → `x_b`)** で出力。polygon は左右辺が斜辺に伸びても、内部水平線は `x_a`〜`x_b` 区間に固定。
+- DC の隣接遷移自体 (Pos/Neg/Pos-half/Neg-half/BusOpen/BusClose/BusCross) は **DC 区間外** に独立した `Transition` 要素として配置される。DC polygon は遷移の slant 範囲だけを「塗り潰しの範囲」として取り込むだけで、遷移線の描画責務は持たない。
+
+##### `DontCareAlongHiZ` の塗り形状
+
+DC-HiZ は **常に矩形** (4 点、`(x_a, y_h)`, `(x_b, y_h)`, `(x_b, y_l)`, `(x_a, y_l)`)。隣接遷移の斜辺には追従しない。
+
+- 隣接が `=` (BusOpen-from-HiZ / BusClose-to-HiZ) や Pos-half / Neg-half でも、polygon は矩形のまま。遷移の `slant` は **波形 polyline 側で別途維持される** (slant=10 等)。
+- `-?-` (HiZ - `?` - HiZ) は **DC-HiZ,1** として扱う (1-cell の DC-HiZ 矩形)。範囲は同 step 数の `==` と同じ。`?` の 0 幅マーカーが両側の `-` を 1 つの DC-HiZ 区間に統合する。
 
 #### `Transition` — `_~` / `~=` / `=_` / `X` 等
 

@@ -116,25 +116,44 @@ cross は前 bus の上下レールから body の上下レールに 2 本の線
 
 ### Don't care (`?`) の解決ルール
 
-`?` は幅 0 のマーカー。`?` を含む同値 Bus 区間 (`?` を挟んで連続する Bus level run + X body) 全体を 1 つの不定値領域として塗る (`<g class="dontcares">` polygon)。
+`?` は幅 0 のマーカー。`?` を含む同値レベル連続区間 (`?` を挟んで連続する同種 level run + 必要に応じて X body) 全体を 1 つの不定値領域として塗る (`<g class="dontcares">` polygon)。塗りは `y_high`〜`y_low` の範囲で、signal_box 全高にはみ出さない。
 
 #### 領域決定
 
-1. `?` の直前のレベル文字 (`_`/`~`/`-`/`=`) または X (BusCross) を文脈とする。
+1. `?` の直前のレベル文字 (`_`/`~`/`-`/`=`) または X (BusCross) を文脈とする。これが DC variant を決める:
+   - `_` → `DontCareAlongLow` (内部線 y_low)
+   - `~` → `DontCareAlongHigh` (内部線 y_high)
+   - `-` → `DontCareAlongHiZ` (内部線 y_mid、破線)
+   - `=` / X → `DontCareAlongBus` (内部線 y_high / y_low 2 本)
 2. 前後に同種レベル記号 / 別の `?` が続く間、領域に取り込む。
 3. 別レベル / `:` (Gap) / 行端で打ち切り。
 4. X (BusCross) は **領域境界として扱い**、polygon の左右辺が cross の半分を取り込む (`>▲▲<` 形)。X 前と X 後で別の bus 値なので別領域。
 5. 透過要素 (`@{...}`、`@N`、`|`、`[`、`]`) は領域計算上スキップ。
+6. **`-?-` 特例**: `?` が両側 HiZ (`-`) に挟まれる場合、`?` を 0 幅マーカーとして両 `-` を 1 つの DC-HiZ 区間に統合する。`-?-` は同 step 数の `==` (DC-HiZ,1 相当) と同範囲の矩形になる。
 
-#### polygon 左右辺の形状
+#### polygon 左右辺の形状 (DC-Low / DC-High / DC-Bus 共通)
+
+DC-HiZ は **常に矩形** で隣接遷移の斜辺に追従しない (下記別表)。それ以外の DC variant では polygon 左右辺は隣接遷移を以下のように追従する:
 
 | 境界 | polygon の辺 |
 |------|-------------|
-| Bus continue (隣接 `=`) | 垂直 |
-| BusOpen (`_=` `~=` `-=`) | 斜辺、Low/High/HiZ 側で y_mid に縮退 (1 点) |
-| BusClose (`=_` `=~` `=-`) | 対称 |
-| X (BusCross) | cross 中点 (`x_cross + slant/2`, y_mid) を polygon 頂点とし、cross の半分を polygon 内に取り込む |
-| 信号行頭 / 行末 / Gap / 別レベル | 垂直 |
+| 信号行頭 / 行末 / Gap / 同レベル continue (`=?=` の `=` 等) | 垂直 (x_a / x_b) |
+| Full slant (Pos / Neg / BusOpen-from-Low / BusOpen-from-High / BusClose-to-Low / BusClose-to-High) | 斜辺。左境界なら `(x_a, y_from) → (x_a + s, y_to)`、右境界なら `(x_b, y_from) → (x_b + s, y_to)` を polygon の辺として取り込む |
+| Half slant (Pos-half / Neg-half / BusOpen-from-HiZ / BusClose-to-HiZ) | y_mid 中継頂点 1 個追加 (slant 端の x が `y_mid` と一致する x)。polygon 頂点数 +1。 |
+| X (BusCross) | cross 中点 (`x_cross + s/2`, y_mid) を polygon 頂点とし、cross の半分を polygon 内に取り込む |
+
+具体ケース表 (DC-Low 16 組 / DC-High 16 組 / DC-HiZ 17 組 / DC-Bus 25 組) は `docs/tests/svg-rendering.feature.md` §「`#1`」を参照。
+
+#### DC-HiZ の塗り形状
+
+DC-HiZ (`-?` を含む `-...-` 区間) は **常に矩形** (`(x_a, y_h)`, `(x_b, y_h)`, `(x_b, y_l)`, `(x_a, y_l)`)。隣接遷移の斜辺には追従しない。
+
+- 隣接が full slant (`_-?` 等) や half slant (`-?_` 等) でも polygon は矩形のまま。slant 自体は **波形 polyline 側で維持される** (`@slant` 通りに描画)。
+- `-?-` は DC-HiZ,1 (1-cell)。
+
+#### 隣接遷移の slant 保持
+
+`?` を含む信号行でも、隣接する遷移 (SingleEdge / BusOpen / BusClose / BusCross) は **`@slant` どおりに描画**される (`?` の有無で垂直 / slant=0 に縮退してはならない)。これは `_?_~_` のような Single 行、`_?__===_?_` のような Single ↔ Bus 行、`~~?~~===~?~` のような DC-High ↔ Bus 直接遷移行のすべてに適用される。
 
 #### 例 (step=10, slant=2)
 
@@ -147,6 +166,10 @@ cross は前 bus の上下レールから body の上下レールに 2 本の線
 | `=?X=` | 五角形 (左垂直、右 X 半分) | 信号始端 〜 X cross 中点 |
 | `____????` | 矩形 (Low) | 4 × step |
 | `==?==X==` | 矩形 (X で打ち切り) | 4 × step |
+| `_?` (DC-Low,1) | 矩形 | 1 × step |
+| `_?~` (DC-Low,1 + Pos) | 台形 `/` (右上斜辺) | 1 × step + 右に slant 拡張 |
+| `_?-` (DC-Low,1 + Pos-half) | 五頂点 (右 y_mid 中継) | 同上 |
+| `-?-` (DC-HiZ,1) | 矩形 | 1 × step |
 
 #### 内部線位置
 
@@ -267,7 +290,7 @@ bar  ___~~~@1__
 | `guide_width` | `0.6` | 縦線の幅 (px) |
 | `bg` | `none` | 次の 1 行 (種別問わず) の `Line.bbox` 全体の背景色 (ローカル上書き) |
 | `highlight_style` | `fill="#ff8" stroke="none"` | ハイライト区間のスタイル (SVG 属性を空白区切り) |
-| `dontcare_color` | `#bbb` | DontCare 矩形のハッチ線色。`@dontcare_color #c00` のように単一の色値を指定すると、それ以降の行の `?` ハッチ線色がその値に切り替わる (途中で再宣言可)。値書式は `@bgcolor0` 等と同じ |
+| `dontcare_color` | `#bbb` | DontCare polygon のハッチ線色。`@dontcare_color #c00` のように単一の色値を指定すると、それ以降の行の `?` ハッチ線色がその値に切り替わる (途中で再宣言可)。値書式は `@bgcolor0` 等と同じ |
 | `titlealign` | `center` | `@title` 行の横揃え。`center` / `left` / `right`。途中変更すると、それ以降の `@title` から適用 |
 | `clockmark_position` | `0.5` | クロック三角形マーカーの頂点位置 (線方向比、`0.0..=1.0`) |
 | `clockmark_height` | `7.5` | クロック三角形マーカーの高さ (px) |
@@ -322,7 +345,7 @@ SVG 属性を `key="value"` 形式で空白区切り指定。
 @dontcare_color #c00
 ```
 
-単一の色値を取る (引用なし、`@bgcolor0` 等と同じ書式)。ハッチ線の色をその値に切り替え、それ以降の行に適用される (チャート途中で再宣言可)。DontCare 矩形は常に `<defs>` 内のハッチパターン参照のみで、アウトライン (枠線) は持たない。
+単一の色値を取る (引用なし、`@bgcolor0` 等と同じ書式)。ハッチ線の色をその値に切り替え、それ以降の行に適用される (チャート途中で再宣言可)。DontCare polygon は常に `<defs>` 内のハッチパターン参照のみで、アウトライン (枠線) は持たない。
 
 `<defs>` には、チャートで実際に使われた色ごとに `<pattern>` が ID `dontcare-hatch-1`, `dontcare-hatch-2`, … として出力される (同色は ID 共有)。チャート内に `LevelRun(DontCareAlong*)` が 1 つ以上存在すれば `<defs>` は常に出力される (`?` はパース後 `LevelRun(DontCareAlong*)` に変換されるため、有効な `?` が 1 つでもあれば該当する)。
 

@@ -301,10 +301,10 @@ Highlight  __[~~~~]__
                         ["<code>X</code>", "bus 包絡"],
                     ],
                 },
-                {"type": "heading", "level": 3, "text": "Bus 内 ? の塗り形状"},
+                {"type": "heading", "level": 3, "text": "? の塗り形状"},
                 {
                     "type": "text",
-                    "content": "<p>Bus 文脈の <code>?</code> (<code>=?=</code> 等) は、前後の波形境界に応じた多角形で塗られます。信号 1 行ぶんの表示エリアからはみ出すことはありません。</p>",
+                    "content": "<p><code>?</code> の塗り polygon は <strong>y_high〜y_low の範囲</strong>で出力されます (signal_box 全高にははみ出しません)。Bus / Low / High 文脈の <code>?</code> (<code>=?=</code> / <code>_?</code> / <code>~?_</code> 等) は、前後の波形境界 (Pos / Neg / Pos-half / Neg-half / BusOpen / BusClose / BusCross) に応じた多角形で塗られます。HiZ 文脈の <code>?</code> (<code>-?</code> / <code>-?-</code> 等) は常に矩形で、隣接遷移の斜辺には追従しません。</p><p><code>?</code> を含む信号行でも、隣接する遷移 (SingleEdge / BusOpen / BusClose / BusCross) は <code>@slant</code> で指定した幅で描画されます (垂直 / slant=0 に縮退しません)。</p><p><code>-?-</code> は両側 HiZ に挟まれた特例で、1-cell の DC-HiZ 矩形として扱われます (同 step 数の <code>==</code> と同範囲)。</p>",
                 },
                 {
                     "type": "sample",
@@ -554,7 +554,7 @@ Out     ___@{o1}~~~~@{o2}__
                         ["<code>guide_width</code>", "<code>0.6</code>", "縦線の幅 (px)。"],
                         ["<code>bg</code>", "<code>none</code>", "次の 1 行の背景色 (ローカル上書き)。"],
                         ["<code>highlight_style</code>", "<code>fill=\"#ff8\" stroke=\"none\"</code>", "ハイライト矩形のスタイル。"],
-                        ["<code>dontcare_color</code>", "<code>#bbb</code>", "<code>?</code> ハッチ線色。<code>@dontcare_color #c00</code> のように単一の色値を指定するとそれ以降の行の色が切り替わる (途中で再宣言可)。"],
+                        ["<code>dontcare_color</code>", "<code>#bbb</code>", "<code>?</code> polygon のハッチ線色。<code>@dontcare_color #c00</code> のように単一の色値を指定するとそれ以降の行の色が切り替わる (途中で再宣言可)。"],
                         ["<code>titlealign</code>", "<code>center</code>", "<code>@title</code> の横揃え (<code>center</code> / <code>left</code> / <code>right</code>)。"],
                         ["<code>clockmark_position</code>", "<code>0.5</code>", "クロック三角形マーカーの頂点位置 (線方向比 0.0..=1.0)。"],
                         ["<code>clockmark_height</code>", "<code>7.5</code>", "クロック三角形マーカーの高さ (px)。"],
