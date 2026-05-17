@@ -2459,3 +2459,406 @@ fn issue1_bug_bus2_pattern_busopen_and_busclose_with_dc_high() {
     );
 }
 
+// ============================================================================
+// GitHub issue #2: HiZ-routed transitions must not let a solid polyline
+// "tunnel" through the HiZ run.
+//
+// `@slant 10`, `@step 25`, signal label "A " adds an x-offset of 25 px.
+// y_h = 15, y_mid = 23.4, y_l = 31.8 (render_slant10_step25 constants).
+// Spec: docs/spec/svg-rendering.md §「Polyline 蓄積器 (`PolyAccum`)」
+//       §「SingleEdge — Single ↔ Single」.
+// Test spec: docs/tests/svg-rendering.feature.md §「#2: HiZ 経由の遷移で
+//            実線 polyline が貫通しない」.
+// ============================================================================
+
+/// Split waveform polylines into (solid, dashed) based on the presence of
+/// `stroke-dasharray=` on each `<polyline>` element. Returns the points
+/// strings for each polyline in document order, separated by style.
+fn extract_polylines_by_style(svg: &str) -> (Vec<String>, Vec<String>) {
+    let layer = extract_layer(svg, "waveforms");
+    let mut solid = Vec::new();
+    let mut dashed = Vec::new();
+    let mut rest = layer;
+    while let Some(open) = rest.find("<polyline") {
+        let after_polyline = &rest[open..];
+        let Some(end_offset) = after_polyline.find("/>") else {
+            break;
+        };
+        let tag = &after_polyline[..end_offset + 2];
+        let Some(points_start) = tag.find("points=\"") else {
+            rest = &after_polyline[end_offset + 2..];
+            continue;
+        };
+        let after_points = &tag[points_start + "points=\"".len()..];
+        let Some(points_close) = after_points.find('"') else {
+            rest = &after_polyline[end_offset + 2..];
+            continue;
+        };
+        let points = after_points[..points_close].to_owned();
+        if tag.contains("stroke-dasharray") {
+            dashed.push(points);
+        } else {
+            solid.push(points);
+        }
+        rest = &after_polyline[end_offset + 2..];
+    }
+    (solid, dashed)
+}
+
+/// Assert that no solid (non-dashed) polyline contains a vertex inside the
+/// strict HiZ x-range (x_left, x_right). A vertex exactly at the boundary is
+/// allowed (transitions are accumulated into the dashed polyline; solid
+/// polylines may only touch the boundary on their final point).
+fn assert_no_solid_vertex_inside_hiz(
+    svg: &str,
+    x_left_exclusive: f32,
+    x_right_exclusive: f32,
+    label: &str,
+) {
+    let (solid_polylines, _) = extract_polylines_by_style(svg);
+    for points_string in &solid_polylines {
+        for (x, _y) in parse_polygon_points(points_string) {
+            assert!(
+                !(x > x_left_exclusive + 0.5 && x < x_right_exclusive - 0.5),
+                "{label}: solid polyline must not contain a vertex inside the HiZ x-range \
+                 ({x_left_exclusive}, {x_right_exclusive}); got x={x} in {points_string:?}",
+            );
+        }
+    }
+}
+
+/// Assert that a dashed (`stroke-dasharray`) polyline contains the given
+/// consecutive segment.
+fn assert_dashed_polyline_contains_segment(
+    svg: &str,
+    from: (f32, f32),
+    to: (f32, f32),
+    label: &str,
+) {
+    let (_, dashed_polylines) = extract_polylines_by_style(svg);
+    let (from_x, from_y) = from;
+    let (to_x, to_y) = to;
+    for points_string in &dashed_polylines {
+        let parsed = parse_polygon_points(points_string);
+        for window in parsed.windows(2) {
+            let &[(start_x, start_y), (end_x, end_y)] = window else {
+                continue;
+            };
+            if (start_x - from_x).abs() < 0.5
+                && (start_y - from_y).abs() < 0.5
+                && (end_x - to_x).abs() < 0.5
+                && (end_y - to_y).abs() < 0.5
+            {
+                return;
+            }
+        }
+    }
+    panic!(
+        "{label}: expected dashed segment ({from_x}, {from_y}) -> ({to_x}, {to_y}) not found in dashed polylines: \
+         {dashed_polylines:?}",
+    );
+}
+
+/// Assert that a solid (non-dashed) polyline contains the given consecutive
+/// segment.
+fn assert_solid_polyline_contains_segment(
+    svg: &str,
+    from: (f32, f32),
+    to: (f32, f32),
+    label: &str,
+) {
+    let (solid_polylines, _) = extract_polylines_by_style(svg);
+    let (from_x, from_y) = from;
+    let (to_x, to_y) = to;
+    for points_string in &solid_polylines {
+        let parsed = parse_polygon_points(points_string);
+        for window in parsed.windows(2) {
+            let &[(start_x, start_y), (end_x, end_y)] = window else {
+                continue;
+            };
+            if (start_x - from_x).abs() < 0.5
+                && (start_y - from_y).abs() < 0.5
+                && (end_x - to_x).abs() < 0.5
+                && (end_y - to_y).abs() < 0.5
+            {
+                return;
+            }
+        }
+    }
+    panic!(
+        "{label}: expected solid segment ({from_x}, {from_y}) -> ({to_x}, {to_y}) not found in solid polylines: \
+         {solid_polylines:?}",
+    );
+}
+
+#[test]
+fn issue2_high_hiz_low_solid_polylines_do_not_tunnel() {
+    // `~~----___`: High(2) + SingleEdge(H->HiZ) + HiZ(4, preceded)
+    //   + SingleEdge(HiZ->Low) + Low(3, preceded).
+    // Layout (step=25, slant=10, signal-label "A " adds 25 px x-offset):
+    //   High(2)         [25,  75]   width=50
+    //   slant (H->HiZ)  [75,  85]   width=10
+    //   HiZ(4, preceded)[85, 175]   width=4*25-10=90
+    //   slant (HiZ->L)  [175,185]   width=10
+    //   Low(3, preceded)[185,250]   width=3*25-10=65
+    // x_b1=75 (~~ end / first slant start), x_b2=175 (HiZ end / second slant start).
+    let svg = render_slant10_step25("~~----___");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid polylines (~~ + ___), got {}: {solid_polylines:?}",
+        solid_polylines.len(),
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed polyline (HiZ run with slants), got {}: {dashed_polylines:?}",
+        dashed_polylines.len(),
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (25.0, CHART_Y_HIGH),
+        (75.0, CHART_Y_HIGH),
+        "solid ~~ run",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "dashed entry slant ~-",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (85.0, CHART_Y_MID),
+        (175.0, CHART_Y_MID),
+        "dashed HiZ hold",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_MID),
+        (185.0, CHART_Y_LOW),
+        "dashed exit slant -_",
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (185.0, CHART_Y_LOW),
+        (250.0, CHART_Y_LOW),
+        "solid ___ run",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 185.0, "~~----___");
+}
+
+#[test]
+fn issue2_low_hiz_high_symmetric_no_tunnel() {
+    // `__----~~~` (mirror of ~~----___). Same layout, levels swapped.
+    let svg = render_slant10_step25("__----~~~");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid polylines: {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed polyline: {dashed_polylines:?}"
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (25.0, CHART_Y_LOW),
+        (75.0, CHART_Y_LOW),
+        "solid __ run",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_LOW),
+        (85.0, CHART_Y_MID),
+        "dashed entry slant _-",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_MID),
+        (185.0, CHART_Y_HIGH),
+        "dashed exit slant -~",
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (185.0, CHART_Y_HIGH),
+        (250.0, CHART_Y_HIGH),
+        "solid ~~~ run",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 185.0, "__----~~~");
+}
+
+#[test]
+fn issue2_hiz_high_to_high_v_shape() {
+    // `~~--~~` (6 units): High(2) + SingleEdge(H->HiZ) + HiZ(2, preceded)
+    //   + SingleEdge(HiZ->H) + High(2, preceded).
+    // Layout:
+    //   High(2)         [25,  75]
+    //   slant           [75,  85]
+    //   HiZ(2, preceded)[85, 125]   width=2*25-10=40
+    //   slant           [125,135]
+    //   High(2,preceded)[135,175]
+    // V shape: y_h → y_mid → y_h.
+    let svg = render_slant10_step25("~~--~~");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid ~~ polylines: {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed V-shape polyline: {dashed_polylines:?}"
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "V-shape entry slant",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_MID),
+        (135.0, CHART_Y_HIGH),
+        "V-shape exit slant",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "~~--~~");
+}
+
+#[test]
+fn issue2_hiz_low_to_low_u_shape() {
+    // `__--__`: same layout as ~~--~~ with Low/HiZ/Low.
+    let svg = render_slant10_step25("__--__");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid __ polylines: {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed U-shape polyline: {dashed_polylines:?}"
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_LOW),
+        (85.0, CHART_Y_MID),
+        "U-shape entry slant",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_MID),
+        (135.0, CHART_Y_LOW),
+        "U-shape exit slant",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "__--__");
+}
+
+#[test]
+fn issue2_double_hiz_band_three_solids_two_dashed() {
+    // `~~--__--~~` (10 units): High(2) + SingleEdge + HiZ(2) + SingleEdge
+    //   + Low(2) + SingleEdge + HiZ(2) + SingleEdge + High(2).
+    // Layout (step=25, slant=10):
+    //   High(2)         [25,  75]
+    //   slant           [75,  85]
+    //   HiZ(2, preceded)[85, 125]
+    //   slant           [125,135]
+    //   Low(2, preceded)[135,175]
+    //   slant           [175,185]
+    //   HiZ(2, preceded)[185,225]
+    //   slant           [225,235]
+    //   High(2,preceded)[235,275]
+    let svg = render_slant10_step25("~~--__--~~");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        3,
+        "expected 3 solid polylines (~~, __, ~~), got {}: {solid_polylines:?}",
+        solid_polylines.len(),
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        2,
+        "expected 2 dashed polylines (HiZ bands separated by Low), got {}: {dashed_polylines:?}",
+        dashed_polylines.len(),
+    );
+    // First dashed band (high → low through HiZ).
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "first HiZ band entry",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_MID),
+        (135.0, CHART_Y_LOW),
+        "first HiZ band exit",
+    );
+    // Second dashed band (low → high through HiZ).
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_LOW),
+        (185.0, CHART_Y_MID),
+        "second HiZ band entry",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (225.0, CHART_Y_MID),
+        (235.0, CHART_Y_HIGH),
+        "second HiZ band exit",
+    );
+    // Solid middle Low run.
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (135.0, CHART_Y_LOW),
+        (175.0, CHART_Y_LOW),
+        "middle solid __ run",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "~~--__--~~ band 1");
+    assert_no_solid_vertex_inside_hiz(&svg, 175.0, 235.0, "~~--__--~~ band 2");
+}
+
+#[test]
+fn issue2_one_cell_hiz_still_splits_solid_polylines() {
+    // `~~-___` (6 units): High(2) + SingleEdge + HiZ(1, preceded) + SingleEdge
+    //   + Low(3, preceded).
+    // Layout: High(2) [25, 75]; slant [75, 85]; HiZ(1, preceded) [85, 100];
+    //   slant [100, 110]; Low(3, preceded) [110, 175].
+    let svg = render_slant10_step25("~~-___");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "1-cell HiZ must still split solids (~~ and ___): {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "1-cell HiZ band must be one dashed polyline: {dashed_polylines:?}"
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "1-cell HiZ entry slant",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (85.0, CHART_Y_MID),
+        (100.0, CHART_Y_MID),
+        "1-cell HiZ hold (step-slant=15)",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (100.0, CHART_Y_MID),
+        (110.0, CHART_Y_LOW),
+        "1-cell HiZ exit slant",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 110.0, "~~-___");
+}

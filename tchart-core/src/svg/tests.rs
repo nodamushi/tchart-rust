@@ -2022,6 +2022,40 @@ fn collect_polyline_points(svg: &str) -> Vec<String> {
     result
 }
 
+/// Split waveform polylines into `(solid, dashed)` lists based on the
+/// presence of `stroke-dasharray=` on each `<polyline>` element.
+///
+/// Used by HiZ-boundary connection tests that must not depend on the
+/// flush order between solid and dashed accumulators.
+fn collect_polyline_points_by_style(svg: &str) -> (Vec<String>, Vec<String>) {
+    let waveforms_start = svg.find("class=\"waveforms\"").expect("waveforms layer");
+    let waveforms_end = svg[waveforms_start..].find("</g>").expect("close") + waveforms_start;
+    let layer = &svg[waveforms_start..waveforms_end];
+    let mut solid = Vec::new();
+    let mut dashed = Vec::new();
+    let mut search = layer;
+    while let Some(open) = search.find("<polyline") {
+        let tag_rest = &search[open..];
+        let Some(tag_end) = tag_rest.find("/>") else {
+            break;
+        };
+        let tag = &tag_rest[..tag_end + 2];
+        if let Some(points_start_offset) = tag.find("points=\"") {
+            let after_points = &tag[points_start_offset + "points=\"".len()..];
+            if let Some(points_end) = after_points.find('"') {
+                let points = after_points[..points_end].to_owned();
+                if tag.contains("stroke-dasharray") {
+                    dashed.push(points);
+                } else {
+                    solid.push(points);
+                }
+            }
+        }
+        search = &tag_rest[tag_end + 2..];
+    }
+    (solid, dashed)
+}
+
 /// Parse the first `x,y` pair from a points string like `"50,28 60,28 62,20"`.
 fn first_point(points: &str) -> (f32, f32) {
     let pair = points
@@ -2089,10 +2123,8 @@ fn low_to_hiz_single_edge_no_gap_with_slant() {
 #[test]
 fn hiz_to_low_single_edge_no_gap_with_slant() {
     // HiZ→Low SingleEdge で slant=2 のとき前後 polyline が接続される。
-    // flush 順は top→hiz なので:
-    //   polylines[0] = top accum → Low LevelRun のみ (始点が接続点)
-    //   polylines[1] = hiz accum → HiZ LevelRun + transition (末点が接続点)
-    // 接続条件: first_point(solid) == last_point(dashed)
+    // 識別は style (stroke-dasharray の有無) で行い、document order には依存しない。
+    // 接続条件: first_point(solid Low) == last_point(dashed HiZ+transition)
     let elements = vec![
         level(SignalLevel::HiZ, 1),
         transition(
@@ -2104,15 +2136,14 @@ fn hiz_to_low_single_edge_no_gap_with_slant() {
     ];
     let line = make_signal_with_slant2(elements);
     let svg = render(&make_doc(vec![line]), &TestFonts);
-    let all_points = collect_polyline_points(&svg);
+    let (solid, dashed) = collect_polyline_points_by_style(&svg);
     assert!(
-        all_points.len() >= 2,
-        "HiZ→Low with slant should produce >=2 polylines, got {}: {svg}",
-        all_points.len()
+        !solid.is_empty() && !dashed.is_empty(),
+        "HiZ→Low with slant should produce both a solid and a dashed polyline, \
+         got solid={solid:?}, dashed={dashed:?}: {svg}"
     );
-    // solid (top) is flushed first, dashed (hiz) second.
-    let (solid_start_x, solid_start_y) = first_point(&all_points[0]);
-    let (dashed_end_x, dashed_end_y) = last_point(&all_points[1]);
+    let (solid_start_x, solid_start_y) = first_point(&solid[0]);
+    let (dashed_end_x, dashed_end_y) = last_point(&dashed[0]);
     assert!(
         (solid_start_x - dashed_end_x).abs() < 1e-3 && (solid_start_y - dashed_end_y).abs() < 1e-3,
         "HiZ→Low gap detected: Low begins at ({solid_start_x},{solid_start_y}), \
@@ -2154,10 +2185,7 @@ fn high_to_hiz_single_edge_no_gap_with_slant() {
 #[test]
 fn hiz_to_high_single_edge_no_gap_with_slant() {
     // HiZ→High SingleEdge で slant=2 のとき前後 polyline が接続される。
-    // flush 順は top→hiz なので:
-    //   polylines[0] = top accum → High LevelRun のみ (始点が接続点)
-    //   polylines[1] = hiz accum → HiZ LevelRun + transition (末点が接続点)
-    // 接続条件: first_point(solid) == last_point(dashed)
+    // 識別は style (stroke-dasharray の有無) で行い、document order には依存しない。
     let elements = vec![
         level(SignalLevel::HiZ, 1),
         transition(
@@ -2169,14 +2197,14 @@ fn hiz_to_high_single_edge_no_gap_with_slant() {
     ];
     let line = make_signal_with_slant2(elements);
     let svg = render(&make_doc(vec![line]), &TestFonts);
-    let all_points = collect_polyline_points(&svg);
+    let (solid, dashed) = collect_polyline_points_by_style(&svg);
     assert!(
-        all_points.len() >= 2,
-        "HiZ→High with slant should produce >=2 polylines, got {}: {svg}",
-        all_points.len()
+        !solid.is_empty() && !dashed.is_empty(),
+        "HiZ→High with slant should produce both a solid and a dashed polyline, \
+         got solid={solid:?}, dashed={dashed:?}: {svg}"
     );
-    let (solid_start_x, solid_start_y) = first_point(&all_points[0]);
-    let (dashed_end_x, dashed_end_y) = last_point(&all_points[1]);
+    let (solid_start_x, solid_start_y) = first_point(&solid[0]);
+    let (dashed_end_x, dashed_end_y) = last_point(&dashed[0]);
     assert!(
         (solid_start_x - dashed_end_x).abs() < 1e-3 && (solid_start_y - dashed_end_y).abs() < 1e-3,
         "HiZ→High gap detected: High begins at ({solid_start_x},{solid_start_y}), \
