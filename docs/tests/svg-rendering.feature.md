@@ -563,6 +563,59 @@ DC-HiZ は polygon が **常に矩形** (隣接遷移の斜辺に追従しない
 - Given `_?_` (Low,1 + DontCareAlongLow,1 + Low,1)
 - Then 全 3 区間が **1 本の polyline** に蓄積される (`<line>` 独立要素は使われない)
 
+---
+
+## #2: HiZ 経由の遷移で実線 polyline が貫通しない (GitHub issue #2)
+
+`-` (HiZ) は破線スタイルで実線と統合できないため、Low/High と HiZ の境界で実線 polyline は分断される。SingleEdge の slant 線 (`~-` / `_-` / `-~` / `-_`) は **HiZ 蓄積器** (破線) に書き出され、HiZ 区間自身の hold と同じ 1 本の HiZ polyline に取り込まれる。実線 polyline が HiZ 区間 (y_mid 経由) を「貫通」する余計な直線は **絶対に** 出してはいけない。
+
+座標規約:
+- `x_b1` = HiZ 区間の左端 x (`~~` → `--` 境界)、`x_b2` = HiZ 区間の右端 x (`--` → `__` 境界)
+- `s` = `@slant`、`step` = `@step`
+- `y_h` / `y_mid` / `y_l` は signal_box の上端 / 中央 / 下端
+
+## @not-implemented @smoke
+### Scenario: `~~----___` (High → HiZ → Low) は実線 2 本 + 破線 1 本 (#2)
+- Given `@slant 10` `@step 25` の信号行 `~~----___`
+- Then 実線 polyline 1 本目: `~~` (`... → x_b1, y_h)` で終端、HiZ 区間を貫通する点を含まない
+- And 破線 polyline (HiZ): `(x_b1, y_h) → (x_b1+s, y_mid) → (x_b2, y_mid) → (x_b2+s, y_l)` を 1 本の `<polyline stroke-dasharray="...">` で出力
+- And 実線 polyline 2 本目: `(x_b2+s, y_l) → ...` で始まる `___`
+- And `(x_b1, y_h)` から `(x_b2+s, y_l)` へ直結する **実線**斜辺は出力されない (バグ症状の禁止)
+
+## @not-implemented
+### Scenario: `__----~~~` (Low → HiZ → High、`~~----___` の対称) は実線 2 本 + 破線 1 本 (#2)
+- Given `@slant 10` `@step 25` の信号行 `__----~~~`
+- Then 実線 polyline 1 本目 `__` は `(... → x_b1, y_l)` で終端
+- And 破線 polyline: `(x_b1, y_l) → (x_b1+s, y_mid) → (x_b2, y_mid) → (x_b2+s, y_h)`
+- And 実線 polyline 2 本目 `~~~` は `(x_b2+s, y_h) → ...` で開始
+- And 実線で `(x_b1, y_l)` から `(x_b2+s, y_h)` を直結する斜辺は出力されない
+
+## @not-implemented
+### Scenario: `~~--__--~~` (HiZ で 2 回挟む) は実線 3 本 + 破線 2 本 (#2)
+- Given `@slant 10` `@step 25` の信号行 `~~--__--~~`
+- Then 出力 polyline は計 5 本: 実線 `~~` (y_h) → 破線 (`~- + -- + -_`、y_h→y_l) → 実線 `__` (y_l) → 破線 (`_- + -- + -~`、y_l→y_h) → 実線 `~~` (y_h)
+- And 各実線 polyline は **対応する level の y** のみを持つ水平線 (`~~` は (..., y_h) 点列、`__` は (..., y_l) 点列)
+- And 破線 polyline は HiZ 蓄積器が境界で flush されるため 2 本に分離 (実線 `__` を挟む)
+
+## @not-implemented
+### Scenario: `~~--~~` (HiZ 経由 High→High 復帰) は実線 2 本 + 破線 1 本 (#2)
+- Given `@slant 10` `@step 25` の信号行 `~~--~~`
+- Then 実線 polyline `~~` 1 本目は (... → x_b1, y_h) で終端
+- And 破線 polyline: `(x_b1, y_h) → (x_b1+s, y_mid) → (x_b2, y_mid) → (x_b2+s, y_h)` (V 字形、y_h→y_mid→y_h)
+- And 実線 polyline `~~` 2 本目は `(x_b2+s, y_h) → ...` で開始
+- And 実線で `(x_b1, y_h)` から `(x_b2+s, y_h)` を直結する水平線は出力されない (両 `~~` は別 polyline)
+
+## @not-implemented
+### Scenario: `__--__` (HiZ 経由 Low→Low 復帰) は実線 2 本 + 破線 1 本 (#2)
+- Given `@slant 10` `@step 25` の信号行 `__--__`
+- Then 実線 polyline `__` 2 本 + 破線 polyline 1 本 (U 字形、y_l→y_mid→y_l) が独立出力
+
+## @not-implemented
+### Scenario: `~~-___` (HiZ,1 で Single → Single の 1-cell HiZ 経由) も polyline 分断 (#2)
+- Given `@slant 10` `@step 25` の信号行 `~~-___`
+- Then HiZ 1-cell ぶんでも実線 polyline は分断される (`~~` と `___` は別 polyline)
+- And HiZ 破線 polyline は `(x_b1, y_h) → (x_b1+s, y_mid) → (x_b2, y_mid) → (x_b2+s, y_l)` を 1 本で出力 (x_b2 - x_b1 = 1 × step、hold 部分は `step - s`)
+
 ## @not-implemented
 ### Scenario: DontCare polygon のデフォルト塗りはハッチパターン参照
 - Given `@dontcare_color` を指定しないチャート (`?` を含む)
