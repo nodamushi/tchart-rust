@@ -1,0 +1,34 @@
+// DC-Low / DC-High / DC-HiZ polygon 形状確認サンプル (#1 修正後)
+// polygon は y_h~y_l 範囲、隣接遷移 (Pos / Neg / Pos-half / Neg-half / BusOpen / BusClose) を辺として取り込む。
+// DC-HiZ は常に矩形 (隣接 slant に追従しない)。
+// `?` を含む信号行でも slant は @slant どおりに維持される。
+@fontsize 14
+@step 18
+@slant 6
+
+@title "DontCareAlong{Low,High,HiZ} polygon shapes"
+
+// DC-Low (内部水平線 y_l)
+"_?"     _?
+"_?~"    _?~~
+"~_?_~"  ~~_?_~~
+"-_?-"   --_?--
+"=_?="   ==_?==
+
+// DC-High (内部水平線 y_h)
+"~?"     ~?
+"~?_"    ~?__
+"_~?~_"  __~?~__
+"-~?-"   --~?--
+
+// DC-HiZ (内部水平線 y_mid、常に矩形)
+"-?"     -?
+"-?-"    -?-
+"_-?-_"  __-?-__
+"~-?-~"  ~~-?-~~
+"=-?-="  ==-?-==
+
+// slant 維持の回帰確認
+"Bug Line"     __?_~~~__?
+"Bug Bus2"     ~~?~~===~?~
+"Normal Line"  ___~~~__
