@@ -9,7 +9,8 @@ mod transition;
 
 use crate::geometry::Point;
 use crate::line::{
-    EdgeMark, LevelRun, Line, LineContent, SignalLevel, SignalRow, WaveformElement,
+    EdgeMark, LevelRun, Line, LineContent, SignalLevel, SignalRow, Transition, TransitionKind,
+    WaveformElement,
 };
 use crate::style::{ChartStyle, GuideStyle, LayoutParams, SvgAttrList};
 use crate::svg::buf::{SvgBuf, WriteSvgOn};
@@ -133,6 +134,14 @@ impl RowOutput {
         // Use this row's own layout snapshot for per-row @step/@slant correctness.
         let layout = context.row.layout_params();
         let width = layout.element_width(element);
+        // Flush the opposite-style accumulator at every HiZ <-> solid boundary
+        // so that a solid polyline cannot tunnel through the HiZ run (dashed
+        // style cannot be merged with solid style anyway).
+        match AccumulatorTarget::classify_element(element) {
+            AccumulatorTarget::Hiz => state.flush_solid_accumulators(&mut self.polylines),
+            AccumulatorTarget::Solid => state.flush_hiz_accumulator(&mut self.polylines),
+            AccumulatorTarget::None => {}
+        }
         match element {
             WaveformElement::Level(run) => {
                 self.append_level(run, elements, index, width, context, state);
@@ -542,3 +551,55 @@ impl WriteSvgOn for HighlightRect<'_> {
     }
 }
 
+/// Which polyline accumulator a waveform element pushes points into.
+///
+/// HiZ-style accumulator (dashed `<polyline>`) and solid accumulators
+/// (top/bottom rails) cannot share a polyline because their stroke styles
+/// differ. The renderer flushes the *opposite* style accumulator before
+/// pushing the element's points so that no solid polyline tunnels through
+/// the HiZ run, and no dashed polyline merges with the surrounding solid
+/// run.
+enum AccumulatorTarget {
+    /// Element pushes into the HiZ accumulator (dashed style).
+    Hiz,
+    /// Element pushes into the solid (top and/or bottom) accumulators.
+    Solid,
+    /// Element does not push into any polyline accumulator (e.g. Guide,
+    /// Highlight markers, Anchor, Text, Gap — Gap handles its own flush).
+    None,
+}
+
+impl AccumulatorTarget {
+    /// Classify the waveform element by which accumulator(s) it pushes into.
+    ///
+    /// This drives the HiZ <-> solid boundary flush in `append_element`. See
+    /// `docs/spec/svg-rendering.md` §「Polyline 蓄積器 (`PolyAccum`)」.
+    fn classify_element(element: &WaveformElement) -> Self {
+        match element {
+            WaveformElement::Level(run) => Self::classify_level(run.level()),
+            WaveformElement::Transition(transition) => Self::classify_transition(transition),
+            // Gap performs its own `flush_all`; the other markers do not push
+            // into any accumulator.
+            _ => Self::None,
+        }
+    }
+
+    fn classify_level(level: SignalLevel) -> Self {
+        match level {
+            SignalLevel::HiZ | SignalLevel::DontCareAlongHiZ => Self::Hiz,
+            _ => Self::Solid,
+        }
+    }
+
+    fn classify_transition(transition: &Transition) -> Self {
+        match transition.kind {
+            TransitionKind::SingleEdge
+                if transition.source == SignalLevel::HiZ
+                    || transition.target == SignalLevel::HiZ =>
+            {
+                Self::Hiz
+            }
+            _ => Self::Solid,
+        }
+    }
+}

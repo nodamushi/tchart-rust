@@ -73,6 +73,25 @@ impl RowState {
         self.hiz.flush(buf, Some(HIZ_DASH));
     }
 
+    /// Flush the solid (top/bottom rail) accumulators.
+    ///
+    /// Called when the renderer is about to push points into the HiZ
+    /// accumulator, so that the solid polyline ends at the boundary instead
+    /// of "tunnelling" through the dashed HiZ run.
+    pub(super) fn flush_solid_accumulators(&mut self, buf: &mut SvgBuf) {
+        self.top.flush(buf, None);
+        self.bottom.flush(buf, None);
+    }
+
+    /// Flush the HiZ (dashed) accumulator.
+    ///
+    /// Called when the renderer is about to push points into a solid
+    /// accumulator after a HiZ run, so that the dashed polyline ends at the
+    /// boundary instead of being merged with the following solid run.
+    pub(super) fn flush_hiz_accumulator(&mut self, buf: &mut SvgBuf) {
+        self.hiz.flush(buf, Some(HIZ_DASH));
+    }
+
     /// Gap: flush polylines and advance the cursor.
     pub(super) fn handle_gap(&mut self, width: Px, buf: &mut SvgBuf) {
         self.flush_all(buf);
