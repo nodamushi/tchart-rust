@@ -424,22 +424,23 @@ fn dontcare_bus_buscross_both_sides_hexagon() {
     assert!((right_top_x - right_bottom_x).abs() < 1e-3, "{points}");
 }
 
-/// `----????====`: the `?` region is `DontCareAlongHiZ` (Single family), which
-/// must emit a `<rect>` — not a `<polygon>` — because Single-family DontCare
-/// shapes are always rectangular with vertical edges (spec §`LevelRun(DontCareAlong*)`).
+/// `----????====`: the `?` region is `DontCareAlongHiZ` (Single family).
+/// Per the updated spec (issue #1 / svg-rendering.md §「`LevelRun(DontCareAlong*)`」)
+/// every DC variant emits a `<polygon>` — the rectangular DC-HiZ shape becomes
+/// a 4-vertex polygon rather than a separate `<rect>` element.
 #[test]
-fn dontcare_hiz_before_bus_emits_rect_not_polygon() {
+fn dontcare_hiz_before_bus_emits_polygon_not_rect() {
     let svg = render_to_svg("A ----????====\n");
     let layer_start = svg.find("class=\"dontcares\"").expect("dontcares layer");
     let layer_end = svg[layer_start..].find("</g>").expect("</g>") + layer_start;
     let layer = &svg[layer_start..layer_end];
     assert!(
-        layer.contains("<rect"),
-        "DontCareAlongHiZ must emit <rect>, got: {layer}"
+        layer.contains("<polygon"),
+        "DontCareAlongHiZ must emit <polygon>, got: {layer}"
     );
     assert!(
-        !layer.contains("<polygon"),
-        "DontCareAlongHiZ must not emit <polygon>, got: {layer}"
+        !layer.contains("<rect"),
+        "DontCareAlongHiZ must not emit <rect>, got: {layer}"
     );
 }
 
@@ -1252,4 +1253,1612 @@ fn iter1_cdata_terminator_in_comment_uses_entity_escape() {
         svg.contains("&gt;"),
         "literal `>` from `]]>` in TCML must be entity-escaped as &gt;: {svg}"
     );
+}
+
+// ============================================================================
+// GitHub issue #1: `?` (DontCare) polygon + adjacent slant preservation tests
+// ============================================================================
+//
+// Test reference: docs/tests/svg-rendering.feature.md §「#1: `?` (DontCare) の
+// 塗り polygon と隣接 slant の完全網羅」 (around L180-560).
+//
+// Test fixture layout: every test uses `@slant 10 @step 25 A <waveform>`.
+// With the stub font (char_width = 7), signal name "A" gives capwidth =
+// 7 + 8(namepad) = 15, so signal origin x = page_margin(10) + capwidth(15) = 25.
+// waveform_y: top = 15, bottom = 31.8, mid = 23.4 (line_height = 14*1.2 = 16.8).
+//
+// Each scenario:
+// - DC region grid range [x_a, x_b] = cell-grid coordinates of the DC region
+//   (independent of preceded/followed slant adjustments inside cell rendering).
+// - Polygon vertices may extend outside [x_a, x_b] when adjacent transitions
+//   produce slant boundaries (Pos/Neg/BusOpen/BusClose/half-slant/BusCross).
+
+const CHART_ORIGIN_X: f32 = 25.0;
+const CHART_Y_HIGH: f32 = 15.0;
+const CHART_Y_MID: f32 = 23.4;
+const CHART_Y_LOW: f32 = 31.8;
+const CHART_STEP: f32 = 25.0;
+const CHART_SLANT: f32 = 10.0;
+
+fn render_slant10_step25(body: &str) -> String {
+    let source = format!("@slant 10\n@step 25\nA {body}\n");
+    render_to_svg(&source)
+}
+
+/// Extract every `<polygon points="...">` points-string from the dontcares
+/// layer, in document order. Returns one entry per polygon.
+fn extract_all_dontcares_polygons(svg: &str) -> Vec<String> {
+    let layer = extract_layer(svg, "dontcares");
+    let mut result = Vec::new();
+    let mut rest = layer;
+    while let Some(open) = rest.find("<polygon points=\"") {
+        let after_open = &rest[open + "<polygon points=\"".len()..];
+        let Some(close) = after_open.find('"') else {
+            break;
+        };
+        result.push(after_open[..close].to_owned());
+        rest = &after_open[close..];
+    }
+    result
+}
+
+/// Parse a `<polygon>`'s points string into a list of (x, y) pairs.
+fn parse_polygon_points(points: &str) -> Vec<(f32, f32)> {
+    points
+        .split_whitespace()
+        .filter_map(|pair| {
+            let mut parts = pair.split(',');
+            let x = parts.next()?.parse().ok()?;
+            let y = parts.next()?.parse().ok()?;
+            Some((x, y))
+        })
+        .collect()
+}
+
+/// Compare two coordinate lists with floating-point tolerance.
+fn assert_polygon_eq(got: &str, expected: &[(f32, f32)], label: &str) {
+    let parsed = parse_polygon_points(got);
+    assert_eq!(
+        parsed.len(),
+        expected.len(),
+        "{label}: vertex count mismatch — expected {}, got {} (raw: {got})",
+        expected.len(),
+        parsed.len()
+    );
+    for (index, (&(actual_x, actual_y), &(want_x, want_y))) in
+        parsed.iter().zip(expected.iter()).enumerate()
+    {
+        assert!(
+            (actual_x - want_x).abs() < 0.5 && (actual_y - want_y).abs() < 0.5,
+            "{label}: vertex {index} mismatch — expected ({want_x}, {want_y}), got ({actual_x}, {actual_y}) (raw: {got})",
+        );
+    }
+}
+
+/// Extract every `<polyline points="...">` points string from the waveforms layer.
+fn extract_all_waveform_polylines(svg: &str) -> Vec<String> {
+    let layer = extract_layer(svg, "waveforms");
+    let mut result = Vec::new();
+    let mut rest = layer;
+    while let Some(open) = rest.find("<polyline") {
+        let after_polyline = &rest[open..];
+        let Some(points_offset) = after_polyline.find("points=\"") else {
+            break;
+        };
+        let after_open = &after_polyline[points_offset + "points=\"".len()..];
+        let Some(close) = after_open.find('"') else {
+            break;
+        };
+        result.push(after_open[..close].to_owned());
+        rest = &after_open[close..];
+    }
+    result
+}
+
+/// Assert that the rendered waveform contains a polyline segment from
+/// `(from_x, from_y)` to `(to_x, to_y)` (i.e., two consecutive points).
+fn assert_polyline_contains_segment(svg: &str, from: (f32, f32), to: (f32, f32), label: &str) {
+    let polylines = extract_all_waveform_polylines(svg);
+    let (from_x, from_y) = from;
+    let (to_x, to_y) = to;
+    for points_string in &polylines {
+        let parsed = parse_polygon_points(points_string);
+        for window in parsed.windows(2) {
+            let &[(start_x, start_y), (end_x, end_y)] = window else {
+                continue;
+            };
+            if (start_x - from_x).abs() < 0.5
+                && (start_y - from_y).abs() < 0.5
+                && (end_x - to_x).abs() < 0.5
+                && (end_y - to_y).abs() < 0.5
+            {
+                return;
+            }
+        }
+    }
+    panic!(
+        "{label}: expected segment ({from_x}, {from_y}) -> ({to_x}, {to_y}) not found in waveform polylines: {polylines:?}",
+    );
+}
+
+// ---- DC-Low (16 scenarios) ----
+
+#[test]
+fn issue1_dc_low_start_end_rectangle() {
+    // `_?` → DC-Low(1) at grid [25, 50]. No adjacent transitions.
+    let svg = render_slant10_step25("_?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    assert_eq!(
+        polygons.len(),
+        1,
+        "single DC polygon expected: {polygons:?}"
+    );
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_? DC-Low rectangle",
+    );
+}
+
+#[test]
+fn issue1_dc_low_start_pos_right_trapezoid() {
+    // `_?~` → DC-Low(1) [25, 50], SingleEdge(Pos), High(1) preceded.
+    // Polygon: (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a, y_l).
+    let svg = render_slant10_step25("_?~");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_?~ DC-Low Pos right",
+    );
+}
+
+#[test]
+fn issue1_dc_low_start_pos_half_pentagon() {
+    // `_?-` → DC-Low(1), SingleEdge(Pos-half to HiZ), HiZ(1).
+    // Polygon: (x_a, y_h), (x_b+s, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l).
+    let svg = render_slant10_step25("_?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_?- DC-Low Pos-half right",
+    );
+}
+
+#[test]
+fn issue1_dc_low_start_busopen_right_trapezoid() {
+    // `_?=` → DC-Low(1), BusOpen-from-Low, Bus(1).
+    let svg = render_slant10_step25("_?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_?= DC-Low BusOpen-from-Low right",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_left_trapezoid() {
+    // `~_?` → High(1), SingleEdge(Neg), DC-Low(1).
+    // DC grid: x_a = 25 + 25 = 50, x_b = 75.
+    // Polygon: (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l).
+    let svg = render_slant10_step25("~_?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "~_? DC-Low Neg left",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_left_pos_right_parallelogram() {
+    // `~_?~` → High(1), Neg, DC-Low(1), Pos, High(1).
+    // x_a=50, x_b=75.
+    let svg = render_slant10_step25("~_?~");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "~_?~ DC-Low Neg|Pos parallelogram",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_left_pos_half_right_pentagon() {
+    // `~_?-` → High(1), Neg, DC-Low(1), Pos-half to HiZ, HiZ(1).
+    let svg = render_slant10_step25("~_?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "~_?- DC-Low Neg|Pos-half pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_left_busopen_right_parallelogram() {
+    // `~_?=` → High(1), Neg, DC-Low(1), BusOpen-from-Low, Bus(1).
+    let svg = render_slant10_step25("~_?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "~_?= DC-Low Neg|BusOpen parallelogram",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_half_left_end_pentagon() {
+    // `-_?` → HiZ(1), Neg-half, DC-Low(1).
+    // Polygon: (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid).
+    let svg = render_slant10_step25("-_?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-_? DC-Low Neg-half|end pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_half_left_pos_right_pentagon() {
+    // `-_?~` → HiZ(1), Neg-half, DC-Low(1), Pos, High(1).
+    let svg = render_slant10_step25("-_?~");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-_?~ DC-Low Neg-half|Pos pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_half_left_pos_half_right_hexagon() {
+    // `-_?-` → HiZ(1), Neg-half, DC-Low(1), Pos-half, HiZ(1).
+    let svg = render_slant10_step25("-_?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-_?- DC-Low Neg-half|Pos-half hexagon",
+    );
+}
+
+#[test]
+fn issue1_dc_low_neg_half_left_busopen_right_pentagon() {
+    // `-_?=` → HiZ(1), Neg-half, DC-Low(1), BusOpen-from-Low, Bus(1).
+    let svg = render_slant10_step25("-_?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-_?= DC-Low Neg-half|BusOpen pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_low_busclose_left_end_trapezoid() {
+    // `=_?` → Bus(1), BusClose-to-Low, DC-Low(1).
+    let svg = render_slant10_step25("=_?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "=_? DC-Low BusClose|end trapezoid",
+    );
+}
+
+#[test]
+fn issue1_dc_low_busclose_left_pos_right_parallelogram() {
+    // `=_?~` → Bus(1), BusClose-to-Low, DC-Low(1), Pos, High(1).
+    let svg = render_slant10_step25("=_?~");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "=_?~ DC-Low BusClose|Pos parallelogram",
+    );
+}
+
+#[test]
+fn issue1_dc_low_busclose_left_pos_half_right_pentagon() {
+    // `=_?-` → Bus(1), BusClose, DC-Low(1), Pos-half, HiZ(1).
+    let svg = render_slant10_step25("=_?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "=_?- DC-Low BusClose|Pos-half pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_low_busclose_left_busopen_right_parallelogram() {
+    // `=_?=` → Bus(1), BusClose, DC-Low(1), BusOpen, Bus(1).
+    let svg = render_slant10_step25("=_?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "=_?= DC-Low BusClose|BusOpen parallelogram",
+    );
+}
+
+// ---- DC-High (16 scenarios, mirror of DC-Low) ----
+
+#[test]
+fn issue1_dc_high_start_end_rectangle() {
+    let svg = render_slant10_step25("~?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "~? DC-High rectangle",
+    );
+}
+
+#[test]
+fn issue1_dc_high_start_neg_right_trapezoid() {
+    // `~?_` → DC-High(1), Neg, Low(1).
+    let svg = render_slant10_step25("~?_");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "~?_ DC-High Neg right",
+    );
+}
+
+#[test]
+fn issue1_dc_high_start_neg_half_right_pentagon() {
+    // `~?-` → DC-High(1), Neg-half, HiZ(1).
+    let svg = render_slant10_step25("~?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "~?- DC-High Neg-half right pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_start_busopen_right_trapezoid() {
+    // `~?=` → DC-High(1), BusOpen-from-High, Bus(1).
+    let svg = render_slant10_step25("~?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "~?= DC-High BusOpen-from-High right",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_left_end_trapezoid() {
+    // `_~?` → Low(1), Pos, DC-High(1).
+    let svg = render_slant10_step25("_~?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_~? DC-High Pos left",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_left_neg_right_parallelogram() {
+    // `_~?_` → Low(1), Pos, DC-High(1), Neg, Low(1).
+    let svg = render_slant10_step25("_~?_");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_~?_ DC-High Pos|Neg parallelogram",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_left_neg_half_right_pentagon() {
+    let svg = render_slant10_step25("_~?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_~?- DC-High Pos|Neg-half pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_left_busopen_right_parallelogram() {
+    let svg = render_slant10_step25("_~?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_~?= DC-High Pos|BusOpen parallelogram",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_half_left_end_pentagon() {
+    let svg = render_slant10_step25("-~?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-~? DC-High Pos-half|end pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_half_left_neg_right_pentagon() {
+    let svg = render_slant10_step25("-~?_");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-~?_ DC-High Pos-half|Neg pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_half_left_neg_half_right_hexagon() {
+    let svg = render_slant10_step25("-~?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-~?- DC-High Pos-half|Neg-half hexagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_pos_half_left_busopen_right_pentagon() {
+    let svg = render_slant10_step25("-~?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+            (x_a, CHART_Y_MID),
+        ],
+        "-~?= DC-High Pos-half|BusOpen pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_busclose_left_end_trapezoid() {
+    let svg = render_slant10_step25("=~?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=~? DC-High BusClose|end trapezoid",
+    );
+}
+
+#[test]
+fn issue1_dc_high_busclose_left_neg_right_parallelogram() {
+    let svg = render_slant10_step25("=~?_");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=~?_ DC-High BusClose|Neg parallelogram",
+    );
+}
+
+#[test]
+fn issue1_dc_high_busclose_left_neg_half_right_pentagon() {
+    let svg = render_slant10_step25("=~?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=~?- DC-High BusClose|Neg-half pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_high_busclose_left_busopen_right_parallelogram() {
+    let svg = render_slant10_step25("=~?=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=~?= DC-High BusClose|BusOpen parallelogram",
+    );
+}
+
+// ---- DC-HiZ (17 scenarios, all rectangles) ----
+//
+// DC-HiZ is always a rectangle but emitted as a 4-vertex `<polygon>` per the
+// new spec. Adjacent half-slants stay in the waveform polylines.
+
+fn assert_dc_hiz_rect(svg: &str, x: f32, width: f32, label: &str) {
+    let polygons = extract_all_dontcares_polygons(svg);
+    assert!(
+        !polygons.is_empty(),
+        "{label}: expected at least one DC-HiZ <polygon>, got none: {svg}"
+    );
+    let x_right = x + width;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x, CHART_Y_HIGH),
+            (x_right, CHART_Y_HIGH),
+            (x_right, CHART_Y_LOW),
+            (x, CHART_Y_LOW),
+        ],
+        label,
+    );
+}
+
+#[test]
+fn issue1_dc_hiz_start_end_rectangle() {
+    let svg = render_slant10_step25("-?");
+    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-? DC-HiZ");
+}
+
+#[test]
+fn issue1_dc_hiz_dash_question_dash_one_cell_rectangle() {
+    // `-?-` is treated as DC-HiZ with cell-grid extending across both `-`
+    // characters (2 cells). The polygon spans 2*step = 50 px wide.
+    let svg = render_slant10_step25("-?-");
+    assert_dc_hiz_rect(
+        &svg,
+        CHART_ORIGIN_X,
+        2.0 * CHART_STEP,
+        "-?- DC-HiZ 2-cell rectangle",
+    );
+}
+
+#[test]
+fn issue1_dc_hiz_start_neg_half_to_low_rectangle() {
+    // `-?_` → DC-HiZ(1), Neg-half (HiZ→Low), Low(1).
+    let svg = render_slant10_step25("-?_");
+    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-?_ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_start_pos_half_to_high_rectangle() {
+    let svg = render_slant10_step25("-?~");
+    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-?~ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_start_busopen_from_hiz_rectangle() {
+    let svg = render_slant10_step25("-?=");
+    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-?= DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_pos_half_from_low_end_rectangle() {
+    let svg = render_slant10_step25("_-?");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-? DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_pos_half_from_low_neg_half_to_low_rectangle() {
+    let svg = render_slant10_step25("_-?_");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-?_ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_pos_half_from_low_pos_half_to_high_rectangle() {
+    let svg = render_slant10_step25("_-?~");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-?~ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_pos_half_from_low_busopen_from_hiz_rectangle() {
+    let svg = render_slant10_step25("_-?=");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-?= DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_neg_half_from_high_end_rectangle() {
+    let svg = render_slant10_step25("~-?");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-? DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_neg_half_from_high_neg_half_to_low_rectangle() {
+    let svg = render_slant10_step25("~-?_");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-?_ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_neg_half_from_high_pos_half_to_high_rectangle() {
+    let svg = render_slant10_step25("~-?~");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-?~ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_neg_half_from_high_busopen_from_hiz_rectangle() {
+    let svg = render_slant10_step25("~-?=");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-?= DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_busclose_to_hiz_end_rectangle() {
+    let svg = render_slant10_step25("=-?");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-? DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_busclose_to_hiz_neg_half_to_low_rectangle() {
+    let svg = render_slant10_step25("=-?_");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-?_ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_busclose_to_hiz_pos_half_to_high_rectangle() {
+    let svg = render_slant10_step25("=-?~");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-?~ DC-HiZ rect");
+}
+
+#[test]
+fn issue1_dc_hiz_busclose_to_hiz_busopen_from_hiz_rectangle() {
+    let svg = render_slant10_step25("=-?=");
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-?= DC-HiZ rect");
+}
+
+// ---- DC-Bus補完 (single-side ` =? ` / `?= `, BusCross variants) ----
+
+#[test]
+fn issue1_dc_bus_start_end_single_cell_rectangle() {
+    // `=?` → DC-Bus(1). No adjacent transition.
+    let svg = render_slant10_step25("=?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=? DC-Bus rectangle",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_low_left_busopen_polygon() {
+    // `_=?` → Low(1), BusOpen-from-Low, DC-Bus(1).
+    // Polygon: (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l).
+    let svg = render_slant10_step25("_=?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "_=? DC-Bus from-Low polygon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_high_left_busopen_polygon() {
+    // `~=?` → High(1), BusOpen-from-High, DC-Bus(1).
+    let svg = render_slant10_step25("~=?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "~=? DC-Bus from-High polygon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_hiz_left_busopen_wedge_pentagon() {
+    // `-=?` → HiZ(1), BusOpen-from-HiZ, DC-Bus(1).
+    let svg = render_slant10_step25("-=?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_MID),
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "-=? DC-Bus from-HiZ wedge pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_busclose_to_low_right_polygon() {
+    // `=?_` → DC-Bus(1), BusClose-to-Low, Low(1).
+    let svg = render_slant10_step25("=?_");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=?_ DC-Bus to-Low polygon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_busclose_to_high_right_polygon() {
+    let svg = render_slant10_step25("=?~");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=?~ DC-Bus to-High polygon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_busclose_to_hiz_right_wedge_pentagon() {
+    let svg = render_slant10_step25("=?-");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "=?- DC-Bus to-HiZ wedge pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_buscross_left_wedge_pentagon() {
+    // `=X?` → Bus(1), BusCross, DC-Bus(1).
+    let svg = render_slant10_step25("=X?");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X + CHART_STEP;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a + s * 0.5, CHART_Y_MID),
+            (x_a + s, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b, CHART_Y_LOW),
+            (x_a + s, CHART_Y_LOW),
+        ],
+        "=X? DC-Bus BusCross-left pentagon",
+    );
+}
+
+#[test]
+fn issue1_dc_bus_buscross_right_wedge_pentagon() {
+    // `X?X=` realises the spec scenario "(start | DC-Bus,1 | BusCross | Bus)":
+    // initial `X` produces a Bus(1) body at signal start, `?` absorbs it into
+    // DC-Bus, then `X=` creates the BusCross on the right.
+    let svg = render_slant10_step25("X?X=");
+    let polygons = extract_all_dontcares_polygons(&svg);
+    let x_a = CHART_ORIGIN_X;
+    let x_b = x_a + CHART_STEP;
+    let s = CHART_SLANT;
+    assert_polygon_eq(
+        &polygons[0],
+        &[
+            (x_a, CHART_Y_HIGH),
+            (x_b, CHART_Y_HIGH),
+            (x_b + s * 0.5, CHART_Y_MID),
+            (x_b, CHART_Y_LOW),
+            (x_a, CHART_Y_LOW),
+        ],
+        "X?X= DC-Bus BusCross-right pentagon",
+    );
+}
+
+// ---- Adjacent transition slant preservation (the core bug) ----
+
+#[test]
+fn issue1_singleedge_slant_preserved_with_dontcare_in_row() {
+    // `_?_~_` → DC-Low(2), Pos slant, High(1), Neg slant, Low(1).
+    // Grid: DC-Low [25, 75], slant [75, 85], High [85, 100], slant [100, 110], Low [110, 125].
+    // The Pos slant after DC-Low must span 10 px (slant=10), NOT 0 px.
+    let svg = render_slant10_step25("_?_~_");
+    let polylines = extract_all_waveform_polylines(&svg);
+    let mut has_slant_after_dc = false;
+    let mut has_slant_before_end = false;
+    for points_string in &polylines {
+        let parsed = parse_polygon_points(points_string);
+        for window in parsed.windows(2) {
+            let (start, end) = (window[0], window[1]);
+            // Pos slant after DC-Low: (75, y_l) -> (85, y_h).
+            if (start.0 - 75.0).abs() < 0.5
+                && (start.1 - CHART_Y_LOW).abs() < 0.5
+                && (end.0 - 85.0).abs() < 0.5
+                && (end.1 - CHART_Y_HIGH).abs() < 0.5
+            {
+                has_slant_after_dc = true;
+            }
+            // Neg slant before final Low: (100, y_h) -> (110, y_l).
+            if (start.0 - 100.0).abs() < 0.5
+                && (start.1 - CHART_Y_HIGH).abs() < 0.5
+                && (end.0 - 110.0).abs() < 0.5
+                && (end.1 - CHART_Y_LOW).abs() < 0.5
+            {
+                has_slant_before_end = true;
+            }
+        }
+    }
+    assert!(
+        has_slant_after_dc,
+        "Pos slant after DC-Low must be drawn at width=10 (not vertical), polylines: {polylines:?}"
+    );
+    assert!(
+        has_slant_before_end,
+        "Neg slant must remain at width=10: {polylines:?}"
+    );
+}
+
+#[test]
+fn issue1_busopen_busclose_slant_preserved_with_dontcare() {
+    // `_?__===_?_`: DC-Low(3), BusOpen, Bus(3), BusClose, DC-Low(2).
+    // Grid layout (step=25, slant=10):
+    //   DC-Low(3): [25, 100]; BusOpen: [100, 110]; Bus(3) body: [110, 175];
+    //   BusClose: [175, 185]; DC-Low(2) body: [185, 235].
+    // BusOpen top rail: (100, y_l) -> (110, y_h) — slant=10 maintained.
+    // BusClose top rail: (175, y_h) -> (185, y_l) — slant=10 maintained.
+    let svg = render_slant10_step25("_?__===_?_");
+    assert_polyline_contains_segment(
+        &svg,
+        (100.0, CHART_Y_LOW),
+        (110.0, CHART_Y_HIGH),
+        "BusOpen top rail (Low side)",
+    );
+    assert_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_HIGH),
+        (185.0, CHART_Y_LOW),
+        "BusClose top rail (Low side)",
+    );
+}
+
+#[test]
+fn issue1_bug_bus2_pattern_busopen_and_busclose_with_dc_high() {
+    // `~~?~~===~?~` → DC-High(4) + BusOpen-from-High + Bus(3) + BusClose-to-High + DC-High(2).
+    // Layout: DC-High(4): [25, 125]; BusOpen: [125, 135]; Bus(3) body: [135, 200];
+    //   BusClose: [200, 210]; DC-High(2) body: [210, 260].
+    // Bug-symptom check: BusOpen bottom rail must slant from (125, y_h) -> (135, y_l).
+    //                    BusClose bottom rail must slant from (200, y_l) -> (210, y_h).
+    let svg = render_slant10_step25("~~?~~===~?~");
+    assert_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_HIGH),
+        (135.0, CHART_Y_LOW),
+        "BusOpen bottom rail (High side) — slant 10 maintained",
+    );
+    assert_polyline_contains_segment(
+        &svg,
+        (200.0, CHART_Y_LOW),
+        (210.0, CHART_Y_HIGH),
+        "BusClose bottom rail (High side) — slant 10 maintained",
+    );
+}
+
+// ============================================================================
+// GitHub issue #2: HiZ-routed transitions must not let a solid polyline
+// "tunnel" through the HiZ run.
+//
+// `@slant 10`, `@step 25`, signal label "A " adds an x-offset of 25 px.
+// y_h = 15, y_mid = 23.4, y_l = 31.8 (render_slant10_step25 constants).
+// Spec: docs/spec/svg-rendering.md §「Polyline 蓄積器 (`PolyAccum`)」
+//       §「SingleEdge — Single ↔ Single」.
+// Test spec: docs/tests/svg-rendering.feature.md §「#2: HiZ 経由の遷移で
+//            実線 polyline が貫通しない」.
+// ============================================================================
+
+/// Split waveform polylines into (solid, dashed) based on the presence of
+/// `stroke-dasharray=` on each `<polyline>` element. Returns the points
+/// strings for each polyline in document order, separated by style.
+fn extract_polylines_by_style(svg: &str) -> (Vec<String>, Vec<String>) {
+    let layer = extract_layer(svg, "waveforms");
+    let mut solid = Vec::new();
+    let mut dashed = Vec::new();
+    let mut rest = layer;
+    while let Some(open) = rest.find("<polyline") {
+        let after_polyline = &rest[open..];
+        let Some(end_offset) = after_polyline.find("/>") else {
+            break;
+        };
+        let tag = &after_polyline[..end_offset + 2];
+        let Some(points_start) = tag.find("points=\"") else {
+            rest = &after_polyline[end_offset + 2..];
+            continue;
+        };
+        let after_points = &tag[points_start + "points=\"".len()..];
+        let Some(points_close) = after_points.find('"') else {
+            rest = &after_polyline[end_offset + 2..];
+            continue;
+        };
+        let points = after_points[..points_close].to_owned();
+        if tag.contains("stroke-dasharray") {
+            dashed.push(points);
+        } else {
+            solid.push(points);
+        }
+        rest = &after_polyline[end_offset + 2..];
+    }
+    (solid, dashed)
+}
+
+/// Assert that no solid (non-dashed) polyline contains a vertex inside the
+/// strict HiZ x-range (x_left, x_right). A vertex exactly at the boundary is
+/// allowed (transitions are accumulated into the dashed polyline; solid
+/// polylines may only touch the boundary on their final point).
+fn assert_no_solid_vertex_inside_hiz(
+    svg: &str,
+    x_left_exclusive: f32,
+    x_right_exclusive: f32,
+    label: &str,
+) {
+    let (solid_polylines, _) = extract_polylines_by_style(svg);
+    for points_string in &solid_polylines {
+        for (x, _y) in parse_polygon_points(points_string) {
+            assert!(
+                !(x > x_left_exclusive + 0.5 && x < x_right_exclusive - 0.5),
+                "{label}: solid polyline must not contain a vertex inside the HiZ x-range \
+                 ({x_left_exclusive}, {x_right_exclusive}); got x={x} in {points_string:?}",
+            );
+        }
+    }
+}
+
+/// Assert that a dashed (`stroke-dasharray`) polyline contains the given
+/// consecutive segment.
+fn assert_dashed_polyline_contains_segment(
+    svg: &str,
+    from: (f32, f32),
+    to: (f32, f32),
+    label: &str,
+) {
+    let (_, dashed_polylines) = extract_polylines_by_style(svg);
+    let (from_x, from_y) = from;
+    let (to_x, to_y) = to;
+    for points_string in &dashed_polylines {
+        let parsed = parse_polygon_points(points_string);
+        for window in parsed.windows(2) {
+            let &[(start_x, start_y), (end_x, end_y)] = window else {
+                continue;
+            };
+            if (start_x - from_x).abs() < 0.5
+                && (start_y - from_y).abs() < 0.5
+                && (end_x - to_x).abs() < 0.5
+                && (end_y - to_y).abs() < 0.5
+            {
+                return;
+            }
+        }
+    }
+    panic!(
+        "{label}: expected dashed segment ({from_x}, {from_y}) -> ({to_x}, {to_y}) not found in dashed polylines: \
+         {dashed_polylines:?}",
+    );
+}
+
+/// Assert that a solid (non-dashed) polyline contains the given consecutive
+/// segment.
+fn assert_solid_polyline_contains_segment(
+    svg: &str,
+    from: (f32, f32),
+    to: (f32, f32),
+    label: &str,
+) {
+    let (solid_polylines, _) = extract_polylines_by_style(svg);
+    let (from_x, from_y) = from;
+    let (to_x, to_y) = to;
+    for points_string in &solid_polylines {
+        let parsed = parse_polygon_points(points_string);
+        for window in parsed.windows(2) {
+            let &[(start_x, start_y), (end_x, end_y)] = window else {
+                continue;
+            };
+            if (start_x - from_x).abs() < 0.5
+                && (start_y - from_y).abs() < 0.5
+                && (end_x - to_x).abs() < 0.5
+                && (end_y - to_y).abs() < 0.5
+            {
+                return;
+            }
+        }
+    }
+    panic!(
+        "{label}: expected solid segment ({from_x}, {from_y}) -> ({to_x}, {to_y}) not found in solid polylines: \
+         {solid_polylines:?}",
+    );
+}
+
+#[test]
+fn issue2_high_hiz_low_solid_polylines_do_not_tunnel() {
+    // `~~----___`: High(2) + SingleEdge(H->HiZ) + HiZ(4, preceded)
+    //   + SingleEdge(HiZ->Low) + Low(3, preceded).
+    // Layout (step=25, slant=10, signal-label "A " adds 25 px x-offset):
+    //   High(2)         [25,  75]   width=50
+    //   slant (H->HiZ)  [75,  85]   width=10
+    //   HiZ(4, preceded)[85, 175]   width=4*25-10=90
+    //   slant (HiZ->L)  [175,185]   width=10
+    //   Low(3, preceded)[185,250]   width=3*25-10=65
+    // x_b1=75 (~~ end / first slant start), x_b2=175 (HiZ end / second slant start).
+    let svg = render_slant10_step25("~~----___");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid polylines (~~ + ___), got {}: {solid_polylines:?}",
+        solid_polylines.len(),
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed polyline (HiZ run with slants), got {}: {dashed_polylines:?}",
+        dashed_polylines.len(),
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (25.0, CHART_Y_HIGH),
+        (75.0, CHART_Y_HIGH),
+        "solid ~~ run",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "dashed entry slant ~-",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (85.0, CHART_Y_MID),
+        (175.0, CHART_Y_MID),
+        "dashed HiZ hold",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_MID),
+        (185.0, CHART_Y_LOW),
+        "dashed exit slant -_",
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (185.0, CHART_Y_LOW),
+        (250.0, CHART_Y_LOW),
+        "solid ___ run",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 185.0, "~~----___");
+}
+
+#[test]
+fn issue2_low_hiz_high_symmetric_no_tunnel() {
+    // `__----~~~` (mirror of ~~----___). Same layout, levels swapped.
+    let svg = render_slant10_step25("__----~~~");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid polylines: {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed polyline: {dashed_polylines:?}"
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (25.0, CHART_Y_LOW),
+        (75.0, CHART_Y_LOW),
+        "solid __ run",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_LOW),
+        (85.0, CHART_Y_MID),
+        "dashed entry slant _-",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_MID),
+        (185.0, CHART_Y_HIGH),
+        "dashed exit slant -~",
+    );
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (185.0, CHART_Y_HIGH),
+        (250.0, CHART_Y_HIGH),
+        "solid ~~~ run",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 185.0, "__----~~~");
+}
+
+#[test]
+fn issue2_hiz_high_to_high_v_shape() {
+    // `~~--~~` (6 units): High(2) + SingleEdge(H->HiZ) + HiZ(2, preceded)
+    //   + SingleEdge(HiZ->H) + High(2, preceded).
+    // Layout:
+    //   High(2)         [25,  75]
+    //   slant           [75,  85]
+    //   HiZ(2, preceded)[85, 125]   width=2*25-10=40
+    //   slant           [125,135]
+    //   High(2,preceded)[135,175]
+    // V shape: y_h → y_mid → y_h.
+    let svg = render_slant10_step25("~~--~~");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid ~~ polylines: {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed V-shape polyline: {dashed_polylines:?}"
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "V-shape entry slant",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_MID),
+        (135.0, CHART_Y_HIGH),
+        "V-shape exit slant",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "~~--~~");
+}
+
+#[test]
+fn issue2_hiz_low_to_low_u_shape() {
+    // `__--__`: same layout as ~~--~~ with Low/HiZ/Low.
+    let svg = render_slant10_step25("__--__");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "expected 2 solid __ polylines: {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "expected 1 dashed U-shape polyline: {dashed_polylines:?}"
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_LOW),
+        (85.0, CHART_Y_MID),
+        "U-shape entry slant",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_MID),
+        (135.0, CHART_Y_LOW),
+        "U-shape exit slant",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "__--__");
+}
+
+#[test]
+fn issue2_double_hiz_band_three_solids_two_dashed() {
+    // `~~--__--~~` (10 units): High(2) + SingleEdge + HiZ(2) + SingleEdge
+    //   + Low(2) + SingleEdge + HiZ(2) + SingleEdge + High(2).
+    // Layout (step=25, slant=10):
+    //   High(2)         [25,  75]
+    //   slant           [75,  85]
+    //   HiZ(2, preceded)[85, 125]
+    //   slant           [125,135]
+    //   Low(2, preceded)[135,175]
+    //   slant           [175,185]
+    //   HiZ(2, preceded)[185,225]
+    //   slant           [225,235]
+    //   High(2,preceded)[235,275]
+    let svg = render_slant10_step25("~~--__--~~");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        3,
+        "expected 3 solid polylines (~~, __, ~~), got {}: {solid_polylines:?}",
+        solid_polylines.len(),
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        2,
+        "expected 2 dashed polylines (HiZ bands separated by Low), got {}: {dashed_polylines:?}",
+        dashed_polylines.len(),
+    );
+    // First dashed band (high → low through HiZ).
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "first HiZ band entry",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (125.0, CHART_Y_MID),
+        (135.0, CHART_Y_LOW),
+        "first HiZ band exit",
+    );
+    // Second dashed band (low → high through HiZ).
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (175.0, CHART_Y_LOW),
+        (185.0, CHART_Y_MID),
+        "second HiZ band entry",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (225.0, CHART_Y_MID),
+        (235.0, CHART_Y_HIGH),
+        "second HiZ band exit",
+    );
+    // Solid middle Low run.
+    assert_solid_polyline_contains_segment(
+        &svg,
+        (135.0, CHART_Y_LOW),
+        (175.0, CHART_Y_LOW),
+        "middle solid __ run",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "~~--__--~~ band 1");
+    assert_no_solid_vertex_inside_hiz(&svg, 175.0, 235.0, "~~--__--~~ band 2");
+}
+
+#[test]
+fn issue2_one_cell_hiz_still_splits_solid_polylines() {
+    // `~~-___` (6 units): High(2) + SingleEdge + HiZ(1, preceded) + SingleEdge
+    //   + Low(3, preceded).
+    // Layout: High(2) [25, 75]; slant [75, 85]; HiZ(1, preceded) [85, 100];
+    //   slant [100, 110]; Low(3, preceded) [110, 175].
+    let svg = render_slant10_step25("~~-___");
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    assert_eq!(
+        solid_polylines.len(),
+        2,
+        "1-cell HiZ must still split solids (~~ and ___): {solid_polylines:?}"
+    );
+    assert_eq!(
+        dashed_polylines.len(),
+        1,
+        "1-cell HiZ band must be one dashed polyline: {dashed_polylines:?}"
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (75.0, CHART_Y_HIGH),
+        (85.0, CHART_Y_MID),
+        "1-cell HiZ entry slant",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (85.0, CHART_Y_MID),
+        (100.0, CHART_Y_MID),
+        "1-cell HiZ hold (step-slant=15)",
+    );
+    assert_dashed_polyline_contains_segment(
+        &svg,
+        (100.0, CHART_Y_MID),
+        (110.0, CHART_Y_LOW),
+        "1-cell HiZ exit slant",
+    );
+    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 110.0, "~~-___");
 }

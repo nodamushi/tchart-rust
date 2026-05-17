@@ -172,7 +172,14 @@ fn classify_transition_kind(from: SignalLevel, to: SignalLevel) -> Option<Transi
     if from == to {
         return None;
     }
-    match (from.into_shape(), to.into_shape()) {
+    // `FillSingle` (DontCareAlongLow/High/HiZ) shares the SingleEdge slant with
+    // the corresponding base level (`for_single` maps both to the same y), so
+    // any boundary involving FillSingle on either side is classified by its
+    // base shape. This mirrors how FillDouble (DontCareAlongBus) is treated as
+    // a bus-family level for transition classification.
+    let from_shape = canonicalize_shape(from);
+    let to_shape = canonicalize_shape(to);
+    match (from_shape, to_shape) {
         (LevelShape::Single, LevelShape::Single) => Some(TransitionKind::SingleEdge),
         // Single -> Double/FillDouble: opening into a bus-family region.
         // FillDouble (`DontCareAlongBus`) absorbs surrounding `=` runs during
@@ -185,7 +192,17 @@ fn classify_transition_kind(from: SignalLevel, to: SignalLevel) -> Option<Transi
         (LevelShape::Double | LevelShape::FillDouble, LevelShape::Single) => {
             Some(TransitionKind::BusClose)
         }
-        // Bus<->Bus or FillSingle pairs do not produce an automatic transition.
+        // Bus<->Bus does not produce an automatic transition.
         _ => None,
+    }
+}
+
+/// Reduce a level's shape to one of `Single`/`Double`/`FillDouble` for
+/// transition classification: FillSingle is folded back into Single because
+/// DC-Low/High/HiZ draw the adjacent slant at the same y as Low/High/HiZ.
+fn canonicalize_shape(level: SignalLevel) -> LevelShape {
+    match level.into_shape() {
+        LevelShape::FillSingle => LevelShape::Single,
+        other => other,
     }
 }

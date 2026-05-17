@@ -1,0 +1,17 @@
+// HiZ (`-`) 経由の遷移で実線 polyline が分断される確認サンプル (#2 修正後)
+// 期待: `~~----___` で実線 polyline は `~~` と `___` の 2 本、
+// HiZ 破線 polyline は `~-` slant + `----` hold + `-_` slant を 1 本にまとめる。
+// 実線 polyline が HiZ 区間を貫通する余計な斜辺は出ない。
+@fontsize 14
+@step 12
+@slant 4
+
+@title "HiZ polyline split"
+
+"H->Z->L"      ~~----___
+"L->Z->H"      __----~~~
+"H->Z->H"      ~~--~~
+"L->Z->L"      __--__
+"multi"        ~~--__--~~
+"1-cell HiZ"   ~~-___
+"normal H->L"  ~~~___

@@ -1,35 +1,15 @@
 //! Bookkeeping state used while iterating waveform elements for one row.
 
-use crate::line::{LevelRun, SignalLevel};
+use crate::line::LevelRun;
 use crate::svg::buf::SvgBuf;
 use crate::svg::geometry::WaveformBoxY;
-use crate::svg::waveform::dontcare::{
-    BusEdge, DontCareBusContext, DontCareBusPolygon, DontCareRect,
-};
-use crate::svg::waveform::dontcare_pattern::DontcareHatchPatternId;
+use crate::svg::waveform::dontcare::DontCarePolygon;
 use crate::svg::waveform::level::LevelDraw;
 use crate::svg::waveform::poly::PolyAccum;
 use crate::units::Px;
 
 /// Dasharray literal used for HiZ runs and `DontCareAlongHiZ` inner lines.
 const HIZ_DASH: &str = "4 2";
-
-/// Arguments for the `DontCareAlongBus` polygon shape, bundled to keep
-/// [`RowState::push_level`] within the project argument-count limit.
-///
-/// `prev_edge`/`next_edge` are resolved by the caller by scanning the waveform
-/// element slice; `slant` is the single-edge transition width; `step` is one
-/// Bus-unit width used to locate HiZ convergence/divergence points.
-pub(super) struct BusPolygonArgs {
-    /// Left-edge shape: resolved by scanning backwards for `BusOpen`.
-    pub(super) prev_edge: BusEdge,
-    /// Right-edge shape: resolved by scanning forwards for `BusClose`.
-    pub(super) next_edge: BusEdge,
-    /// Single-edge transition slant width.
-    pub(super) slant: Px,
-    /// One Bus-level step width, for HiZ y_mid convergence placement.
-    pub(super) step: Px,
-}
 
 /// Trait implemented by waveform pieces that mutate `RowState`.
 ///
@@ -93,18 +73,37 @@ impl RowState {
         self.hiz.flush(buf, Some(HIZ_DASH));
     }
 
+    /// Flush the solid (top/bottom rail) accumulators.
+    ///
+    /// Called when the renderer is about to push points into the HiZ
+    /// accumulator, so that the solid polyline ends at the boundary instead
+    /// of "tunnelling" through the dashed HiZ run.
+    pub(super) fn flush_solid_accumulators(&mut self, buf: &mut SvgBuf) {
+        self.top.flush(buf, None);
+        self.bottom.flush(buf, None);
+    }
+
+    /// Flush the HiZ (dashed) accumulator.
+    ///
+    /// Called when the renderer is about to push points into a solid
+    /// accumulator after a HiZ run, so that the dashed polyline ends at the
+    /// boundary instead of being merged with the following solid run.
+    pub(super) fn flush_hiz_accumulator(&mut self, buf: &mut SvgBuf) {
+        self.hiz.flush(buf, Some(HIZ_DASH));
+    }
+
     /// Gap: flush polylines and advance the cursor.
     pub(super) fn handle_gap(&mut self, width: Px, buf: &mut SvgBuf) {
         self.flush_all(buf);
         self.cursor = self.cursor + width;
     }
 
-    /// Process one `LevelRun`: emit the DontCare backing shape into `rects`
-    /// (when applicable) and push the level's polyline points.
+    /// Process one `LevelRun`: emit the DontCare backing polygon (when the
+    /// caller pre-computed one) and push the level's polyline points.
     ///
-    /// For `DontCareAlongBus`, a `<polygon>` is emitted using the pre-computed
-    /// `bus_context`; all other DontCare variants emit a `<rect>` spanning the
-    /// full `signal_box` height. `bus_context` is ignored for non-Bus DontCare.
+    /// For DontCare levels the caller is expected to supply a
+    /// pre-constructed [`DontCarePolygon`] (the polygon shape depends on
+    /// adjacent transitions, which only the caller sees).
     ///
     /// `&mut SvgBuf` is the single secondary `&mut` argument alongside
     /// `&mut self`; it is not threaded any deeper.
@@ -112,33 +111,11 @@ impl RowState {
         &mut self,
         run: &LevelRun,
         width: Px,
-        pattern_id: Option<DontcareHatchPatternId>,
-        bus_context: &BusPolygonArgs,
+        polygon: Option<DontCarePolygon>,
         rects: &mut SvgBuf,
     ) {
-        if run.level() == SignalLevel::DontCareAlongBus {
-            let pattern_id = pattern_id.expect("DontCareAlongBus must have a pattern id");
-            let context = DontCareBusContext::compute(
-                self.cursor,
-                width,
-                bus_context.slant,
-                bus_context.step,
-                bus_context.prev_edge,
-                bus_context.next_edge,
-            );
-            rects.write(&DontCareBusPolygon {
-                context,
-                waveform_y: self.waveform_y,
-                pattern_id,
-            });
-        } else if run.level().is_dontcare() {
-            let pattern_id = pattern_id.expect("DontCare run must have a pattern id");
-            rects.write(&DontCareRect {
-                x: self.cursor,
-                width,
-                waveform_y: self.waveform_y,
-                pattern_id,
-            });
+        if let Some(polygon) = polygon {
+            rects.write(&polygon);
         }
         self.draw(&LevelDraw {
             width,

@@ -210,7 +210,7 @@ pub trait FontMetrics {
 - `ChartDocument` を 1 つ受け取り、`SvgNode` ツリーを構築 → 文字列化。
 - 描画契約は [`svg-rendering.md`](svg-rendering.md) で網羅。
   - `TransitionKind` ごとの線本数・始終点・接続先 polyline。
-  - `?` (DontCare) 矩形の塗り + 内部水平線描画。
+  - `?` (DontCare) polygon の塗り (y_h〜y_l 範囲、隣接遷移追従) + 内部水平線描画。
   - 矢印 (`Arrow`) の描画 (色・太さ・線種・矢印頭)。
   - エッジ矢印 (clock 由来) の配置。
   - 信号名上線 (`SignalDecorations.name_overline`)。

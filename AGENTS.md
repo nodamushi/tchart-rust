@@ -12,7 +12,7 @@
 
 # No Local IDs (ABSOLUTE)
 
-`docs/bugs.md`, `docs/tasks.md`, `docs/tasks/` and review scratch files own local IDs that are scheduled for deletion. These IDs MUST NOT appear in source, public docs, commit messages, or PR / issue bodies. Only GitHub / GitLab `#123` is allowed.
+`docs/bugs.md`, `docs/bugs/`, `docs/tasks.md`, `docs/tasks/` and review scratch files own local IDs that are scheduled for deletion. These IDs MUST NOT appear in source, public docs, commit messages, or PR / issue bodies. Only GitHub / GitLab `#123` is allowed.
 
 ## ID prefix convention
 
@@ -37,7 +37,7 @@ grep -rnE "(\btcml-(bug|task|audit|review)-[0-9]+|BUG-|\bT-[0-9]+\b|\bA-[0-9]+\b
 
 The regex covers both the new prefix (`tcml-*`) leaking into public files and the legacy short prefixes that are still being purged.
 
-`docs/bugs.md`, `docs/tasks.md`, `docs/tasks/` are the authoritative homes and are excluded from the search. Sentences in public files that depend on a past bug number become meaningless when the local file is deleted — write design rationale in the present tense. Fix every match in one cycle.
+`docs/bugs.md`, `docs/bugs/`, `docs/tasks.md`, `docs/tasks/` are the authoritative homes and are excluded from the search. `docs/bugs.md` is a small index; each individual bug detail lives in `docs/bugs/<slug>.md` (split since v0.1.1 for size reasons — the original single-file form held ~2000 lines). Sentences in public files that depend on a past bug number become meaningless when the local file is deleted — write design rationale in the present tense. Fix every match in one cycle.
 
 # Spec files (docs/spec/*.md, docs/tests/*.feature.md, docs/coding/*.md)
 

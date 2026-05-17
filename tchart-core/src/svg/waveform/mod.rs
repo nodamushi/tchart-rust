@@ -8,16 +8,19 @@ mod state;
 mod transition;
 
 use crate::geometry::Point;
-use crate::line::{EdgeMark, LevelRun, Line, LineContent, SignalRow, WaveformElement};
+use crate::line::{
+    EdgeMark, LevelRun, Line, LineContent, SignalLevel, SignalRow, Transition, TransitionKind,
+    WaveformElement,
+};
 use crate::style::{ChartStyle, GuideStyle, LayoutParams, SvgAttrList};
 use crate::svg::buf::{SvgBuf, WriteSvgOn};
 use crate::svg::geometry::WaveformBoxY;
 use crate::text::{UnsafeLineText, UserText};
 use crate::units::Px;
 
-use crate::svg::waveform::dontcare::BusEdge;
+use crate::svg::waveform::dontcare::{DcSingleKind, DontCarePolygon, DontCarePolygonArgs};
 pub(crate) use dontcare_pattern::{DontcareHatchPatternId, DontcareHatchPatternTable};
-use state::{BusPolygonArgs, RowState};
+use state::RowState;
 
 /// Per-row outputs collected by the waveform pass.
 ///
@@ -131,6 +134,14 @@ impl RowOutput {
         // Use this row's own layout snapshot for per-row @step/@slant correctness.
         let layout = context.row.layout_params();
         let width = layout.element_width(element);
+        // Flush the opposite-style accumulator at every HiZ <-> solid boundary
+        // so that a solid polyline cannot tunnel through the HiZ run (dashed
+        // style cannot be merged with solid style anyway).
+        match AccumulatorTarget::classify_element(element) {
+            AccumulatorTarget::Hiz => state.flush_solid_accumulators(&mut self.polylines),
+            AccumulatorTarget::Solid => state.flush_hiz_accumulator(&mut self.polylines),
+            AccumulatorTarget::None => {}
+        }
         match element {
             WaveformElement::Level(run) => {
                 self.append_level(run, elements, index, width, context, state);
@@ -154,7 +165,8 @@ impl RowOutput {
         }
     }
 
-    /// Handle a `Level` run: track dontcare presence, then push to state.
+    /// Handle a `Level` run: build the DontCare backing polygon (when this
+    /// level is a `DontCareAlong*`) and push the level's polyline points.
     fn append_level(
         &mut self,
         run: &LevelRun,
@@ -164,16 +176,24 @@ impl RowOutput {
         context: &RowContext<'_>,
         state: &mut RowState,
     ) {
-        let pattern_id = if run.level().is_dontcare() {
-            Some(
-                self.dontcare_patterns
-                    .insert_color(context.row.style().signal().dontcare_color()),
-            )
-        } else {
-            None
-        };
-        let bus_args = context.calc_bus_polygon_args(elements, index);
-        state.push_level(run, width, pattern_id, &bus_args, &mut self.dontcare_rects);
+        let polygon = run.level().is_dontcare().then(|| {
+            let pattern_id = self
+                .dontcare_patterns
+                .insert_color(context.row.style().signal().dontcare_color());
+            let layout = context.row.layout_params();
+            let args = DontCarePolygonArgs::new(
+                elements,
+                index,
+                state.cursor(),
+                width,
+                layout.slant(),
+                layout.step(),
+                state.waveform_y(),
+                pattern_id,
+            );
+            context.build_dontcare_polygon(run, args)
+        });
+        state.push_level(run, width, polygon, &mut self.dontcare_rects);
     }
 
     /// Emit a `<text>` element for a waveform text label.
@@ -262,17 +282,23 @@ struct RowContext<'a> {
 }
 
 impl<'a> RowContext<'a> {
-    /// Compute the [`BusPolygonArgs`] for the `DontCareAlongBus` level at `index`.
+    /// Build the DontCare backing polygon for a DC level at `index`.
     ///
-    /// Uses this row's own layout parameter snapshot so that per-row @step/@slant
-    /// changes produce correct polygon coordinates.
-    fn calc_bus_polygon_args(&self, elements: &[WaveformElement], index: usize) -> BusPolygonArgs {
-        let layout = self.row.layout_params();
-        BusPolygonArgs {
-            prev_edge: BusEdge::from_prev(elements, index),
-            next_edge: BusEdge::from_next(elements, index),
-            slant: layout.slant(),
-            step: layout.step(),
+    /// Uses this row's own layout parameter snapshot so per-row `@step`/
+    /// `@slant` changes produce correct polygon coordinates. The polygon's
+    /// shape depends on the DC variant (Low/High/HiZ/Bus) and the adjacent
+    /// transitions around `index`.
+    fn build_dontcare_polygon(
+        &self,
+        run: &LevelRun,
+        args: DontCarePolygonArgs<'_>,
+    ) -> DontCarePolygon {
+        if run.level() == SignalLevel::DontCareAlongBus {
+            DontCarePolygon::for_bus(args)
+        } else {
+            let kind = DcSingleKind::from_level(run.level())
+                .expect("non-bus DontCare run must be DC-Low/High/HiZ");
+            DontCarePolygon::for_single(kind, args)
         }
     }
 }
@@ -522,5 +548,58 @@ impl WriteSvgOn for HighlightRect<'_> {
             target.write_char('"');
         }
         target.write_literal("/>");
+    }
+}
+
+/// Which polyline accumulator a waveform element pushes points into.
+///
+/// HiZ-style accumulator (dashed `<polyline>`) and solid accumulators
+/// (top/bottom rails) cannot share a polyline because their stroke styles
+/// differ. The renderer flushes the *opposite* style accumulator before
+/// pushing the element's points so that no solid polyline tunnels through
+/// the HiZ run, and no dashed polyline merges with the surrounding solid
+/// run.
+enum AccumulatorTarget {
+    /// Element pushes into the HiZ accumulator (dashed style).
+    Hiz,
+    /// Element pushes into the solid (top and/or bottom) accumulators.
+    Solid,
+    /// Element does not push into any polyline accumulator (e.g. Guide,
+    /// Highlight markers, Anchor, Text, Gap — Gap handles its own flush).
+    None,
+}
+
+impl AccumulatorTarget {
+    /// Classify the waveform element by which accumulator(s) it pushes into.
+    ///
+    /// This drives the HiZ <-> solid boundary flush in `append_element`. See
+    /// `docs/spec/svg-rendering.md` §「Polyline 蓄積器 (`PolyAccum`)」.
+    fn classify_element(element: &WaveformElement) -> Self {
+        match element {
+            WaveformElement::Level(run) => Self::classify_level(run.level()),
+            WaveformElement::Transition(transition) => Self::classify_transition(transition),
+            // Gap performs its own `flush_all`; the other markers do not push
+            // into any accumulator.
+            _ => Self::None,
+        }
+    }
+
+    fn classify_level(level: SignalLevel) -> Self {
+        match level {
+            SignalLevel::HiZ | SignalLevel::DontCareAlongHiZ => Self::Hiz,
+            _ => Self::Solid,
+        }
+    }
+
+    fn classify_transition(transition: &Transition) -> Self {
+        match transition.kind {
+            TransitionKind::SingleEdge
+                if transition.source == SignalLevel::HiZ
+                    || transition.target == SignalLevel::HiZ =>
+            {
+                Self::Hiz
+            }
+            _ => Self::Solid,
+        }
     }
 }

@@ -26,7 +26,7 @@ TCML テキスト入力から SVG 出力までの一連のフローを検証す�
 ## @not-implemented
 ### Scenario: highlight_dontcare.tc
 - Given `docs/images/highlight_dontcare.tc`
-- Then `dontcares` レイヤに矩形、`waveforms` レイヤに DontCare 内部水平線
+- Then `dontcares` レイヤに polygon (y_h〜y_l 範囲)、`waveforms` レイヤに DontCare 内部水平線
 - And `highlights` レイヤに矩形が出力される
 
 ## @not-implemented
@@ -394,7 +394,7 @@ TCML テキスト入力から SVG 出力までの一連のフローを検証す�
   @clock(pos) clk
   data __[?@{a}?]__
   ```
-- Then clk に EdgeMark、data にハイライト矩形 + DontCare 矩形 + アンカー登録
+- Then clk に EdgeMark、data にハイライト矩形 + DontCare polygon (y_h〜y_l) + アンカー登録
 
 ### Scenario: `@scale` × per-row `@step` × SVG width 属性
 - Given TCML `@scale 2.0` `@step 10` Sig1 (4 文字), `@step 20` Sig2 (4 文字)
