@@ -1,10 +1,9 @@
-//! Regression tests for known bugs from the previous implementation.
+//! Regression tests for known issues from the previous implementation.
 //!
-//! Each test maps to a specific BUG code documented in
-//! `docs/spec/types.md` §11 and `docs/spec/svg-rendering.md`. They run against
-//! the full pipeline (parse → layout → SVG) so that any layer collapsing back
-//! into the old behaviour is caught.
+//! Each test exercises the full pipeline (parse → layout → SVG) end to end so
+//! that any layer collapsing back into the old behaviour is caught.
 
+use roxmltree::Document;
 use tchart_core::layout::{FontMetrics, layout};
 use tchart_core::parser::parse;
 use tchart_core::svg::render;
@@ -28,21 +27,107 @@ fn render_to_svg(source: &str) -> String {
     render(&document, &stub)
 }
 
-/// Extract an arbitrary `<g class="...">` layer substring from a rendered SVG.
-///
-/// Returns the slice from the `class="..."` attribute up to (but not
-/// including) the next `</g>` close tag. Returns an empty slice when the
-/// requested layer is omitted (per `docs/spec/svg-rendering.md`
-/// §「空レイヤーの省略」 every empty `<g>` is skipped). When the matched
-/// `<g>` is unterminated, returns the slice up to the end of the SVG.
-fn extract_layer<'svg>(svg: &'svg str, class_name: &str) -> &'svg str {
-    let needle = format!("class=\"{class_name}\"");
-    let Some(open) = svg.find(&needle) else {
-        return "";
+fn parse_svg(svg: &str) -> Document<'_> {
+    Document::parse(svg).expect("parsed SVG must be well-formed XML")
+}
+
+/// Find a layer node (`<g class="NAME">`) inside the parsed SVG, returning
+/// `None` when the layer is omitted (per `docs/spec/svg-rendering.md`
+/// §「空レイヤーの省略」 every empty `<g>` is skipped).
+fn find_layer_node<'doc, 'input>(
+    doc: &'doc Document<'input>,
+    class_name: &str,
+) -> Option<roxmltree::Node<'doc, 'input>> {
+    doc.root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("g"))
+        .find(|node| node.attribute("class") == Some(class_name))
+}
+
+/// Count direct/descendant elements with `tag` inside the named layer.
+fn count_elements_in_layer(doc: &Document<'_>, class_name: &str, tag: &str) -> usize {
+    let Some(layer) = find_layer_node(doc, class_name) else {
+        return 0;
     };
-    let after_open = &svg[open..];
-    let close = after_open.find("</g>").unwrap_or(after_open.len());
-    &after_open[..close]
+    layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name(tag))
+        .count()
+}
+
+/// Collect every `points="..."` attribute value found on `<TAG>` elements
+/// inside the named layer, in document order.
+fn collect_points_in_layer(doc: &Document<'_>, class_name: &str, tag: &str) -> Vec<String> {
+    let Some(layer) = find_layer_node(doc, class_name) else {
+        return Vec::new();
+    };
+    layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name(tag))
+        .filter_map(|node| node.attribute("points").map(str::to_owned))
+        .collect()
+}
+
+/// Read a numeric attribute on the SVG root element.
+fn root_attribute_f32(doc: &Document<'_>, name: &str) -> f32 {
+    let value = doc
+        .root_element()
+        .attribute(name)
+        .unwrap_or_else(|| panic!("svg root must have `{name}` attribute"));
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("svg root `{name}` attribute must be a number, got {value:?}"))
+}
+
+/// Read a string attribute on the SVG root element.
+fn root_attribute(doc: &Document<'_>, name: &str) -> String {
+    doc.root_element()
+        .attribute(name)
+        .unwrap_or_else(|| panic!("svg root must have `{name}` attribute"))
+        .to_owned()
+}
+
+/// Read a numeric attribute on the first element with `tag` inside the
+/// named layer (panics on miss).
+fn first_element_attribute_f32(
+    doc: &Document<'_>,
+    class_name: &str,
+    tag: &str,
+    attribute: &str,
+) -> f32 {
+    let layer = find_layer_node(doc, class_name)
+        .unwrap_or_else(|| panic!("layer class=\"{class_name}\" must exist"));
+    let element = layer
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name(tag))
+        .unwrap_or_else(|| panic!("no <{tag}> in layer {class_name}"));
+    let value = element
+        .attribute(attribute)
+        .unwrap_or_else(|| panic!("<{tag}> in layer {class_name} missing `{attribute}` attribute"));
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("<{tag}> `{attribute}` is not a number: {value:?}"))
+}
+
+/// Whether the named layer exists at all in the rendered SVG.
+fn has_layer(doc: &Document<'_>, class_name: &str) -> bool {
+    find_layer_node(doc, class_name).is_some()
+}
+
+/// Whether *any* element anywhere in the SVG has the local name `tag`.
+fn has_element_with_tag(doc: &Document<'_>, tag: &str) -> bool {
+    doc.root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.has_tag_name(tag))
+}
+
+/// Document-order position of the named layer among all elements. Returns
+/// `None` when the layer is omitted from the SVG.
+fn layer_document_index(doc: &Document<'_>, class_name: &str) -> Option<usize> {
+    doc.root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .position(|node| node.has_tag_name("g") && node.attribute("class") == Some(class_name))
 }
 
 /// `Gap` (`:`) inside a signal must split the surrounding
@@ -50,13 +135,11 @@ fn extract_layer<'svg>(svg: &'svg str, class_name: &str) -> &'svg str {
 #[test]
 fn bug001_gap_splits_polyline() {
     let svg = render_to_svg("A __:__\n");
-    let waveforms_open = svg.find("class=\"waveforms\"").expect("waveforms");
-    let waveforms_close = svg[waveforms_open..].find("</g>").expect("close") + waveforms_open;
-    let layer = &svg[waveforms_open..waveforms_close];
-    let polyline_count = layer.matches("<polyline").count();
+    let doc = parse_svg(&svg);
+    let polyline_count = count_elements_in_layer(&doc, "waveforms", "polyline");
     assert!(
         polyline_count >= 2,
-        "Gap must flush all accumulators (>=2 polylines), got {polyline_count} in {layer}"
+        "Gap must flush all accumulators (>=2 polylines), got {polyline_count} in {svg}"
     );
 }
 
@@ -66,9 +149,11 @@ fn bug001_gap_splits_polyline() {
 #[test]
 fn bug002_step_change_scales_width() {
     let narrow = render_to_svg("@step 8\nA _~_~\n");
+    let narrow_doc = parse_svg(&narrow);
     let wide = render_to_svg("@step 16\nA _~_~\n");
-    let narrow_w = parse_svg_attr_f32(&narrow, "width=\"");
-    let wide_w = parse_svg_attr_f32(&wide, "width=\"");
+    let wide_doc = parse_svg(&wide);
+    let narrow_w = root_attribute_f32(&narrow_doc, "width");
+    let wide_w = root_attribute_f32(&wide_doc, "width");
     let delta = wide_w - narrow_w;
     // 4 units * (16 - 8) = 32 px; the SVG width includes labels/margins so we
     // only assert directional scaling, not exact equality.
@@ -84,14 +169,12 @@ fn bug002_step_change_scales_width() {
 #[test]
 fn bug003_no_independent_line_in_waveforms() {
     let svg = render_to_svg("A _~_~\n");
-    let waveforms_open = svg.find("class=\"waveforms\"").expect("waveforms");
-    let waveforms_close = svg[waveforms_open..].find("</g>").expect("close") + waveforms_open;
-    let layer = &svg[waveforms_open..waveforms_close];
+    let doc = parse_svg(&svg);
     assert!(
-        !layer.contains("<line"),
-        "no standalone <line> in waveforms; got {layer}"
+        count_elements_in_layer(&doc, "waveforms", "line") == 0,
+        "no standalone <line> in waveforms; got {svg}"
     );
-    assert!(layer.contains("<polyline"));
+    assert!(count_elements_in_layer(&doc, "waveforms", "polyline") > 0);
 }
 
 /// every `BusOpen` transition must produce two rails
@@ -101,52 +184,26 @@ fn bug003_no_independent_line_in_waveforms() {
 #[test]
 fn bug003_bus_open_emits_two_rails() {
     let svg = render_to_svg("A _=\n");
-    let waveforms_open = svg.find("class=\"waveforms\"").expect("waveforms");
-    let waveforms_close = svg[waveforms_open..].find("</g>").expect("close") + waveforms_open;
-    let layer = &svg[waveforms_open..waveforms_close];
-    let count = layer.matches("<polyline").count();
+    let doc = parse_svg(&svg);
+    let count = count_elements_in_layer(&doc, "waveforms", "polyline");
     assert!(count >= 2, "BusOpen requires 2 rails, got {count}");
 }
 
-fn parse_svg_attr_f32(svg: &str, key: &str) -> f32 {
-    let start = svg.find(key).expect("attr") + key.len();
-    let end = svg[start..].find('"').expect("close");
-    svg[start..start + end].parse().expect("number")
-}
-
-/// Extracts the x coordinate of the last point of every `<polyline>` found in
-/// `layer` (a slice of SVG text already scoped to the waveforms `<g>`).
-fn extract_polyline_endpoint_x_values(layer: &str) -> Vec<f32> {
-    // `points="` is 8 bytes; the offset skips past the opening quote.
-    const POINTS_ATTR_PREFIX_BYTES: usize = 8;
-    layer
-        .split("<polyline")
-        .skip(1)
-        .filter_map(|fragment| {
-            let points_start = fragment.find("points=\"")? + POINTS_ATTR_PREFIX_BYTES;
-            let points_end = fragment[points_start..].find('"')? + points_start;
-            let raw = &fragment[points_start..points_end];
-            raw.split_whitespace()
+/// Extract the x coordinate of the last point of every `<polyline>` found in
+/// the waveforms layer of `doc`.
+fn extract_polyline_endpoint_x_values(doc: &Document<'_>) -> Vec<f32> {
+    collect_points_in_layer(doc, "waveforms", "polyline")
+        .iter()
+        .filter_map(|points_text| {
+            // Attribute value is "x1,y1 x2,y2 ..."; split on whitespace gives
+            // the last pair, then split on `,` gives the trailing x.
+            points_text
+                .split_whitespace()
                 .last()
                 .and_then(|last_pair| last_pair.split(',').next())
                 .and_then(|x_coordinate_text| x_coordinate_text.parse::<f32>().ok())
         })
         .collect()
-}
-
-fn extract_first_tag<'a>(svg: &'a str, layer_class: &str, tag_name: &str) -> &'a str {
-    let open = svg
-        .find(layer_class)
-        .unwrap_or_else(|| panic!("{layer_class} not found"));
-    let close_offset = svg[open..].find("</g>").expect("</g> not found");
-    let layer = &svg[open..open + close_offset];
-    let element_offset = layer
-        .find(tag_name)
-        .unwrap_or_else(|| panic!("no {tag_name} in {layer_class}"));
-    let tail = &layer[element_offset..];
-    let tag_end = tail.find('>').expect("tag end");
-    let layer_start = open;
-    &svg[layer_start + element_offset..layer_start + element_offset + tag_end + 1]
 }
 
 // Guide and Highlight vertical span tests.
@@ -179,14 +236,13 @@ fn t2_no_title_guide_and_highlight_span_full_chart() {
     // Signal A is the source row (contains | and [...]).
     let source = "A __[~~|~~]__\nB __________\nC __________\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let line_tag = extract_first_tag(&svg, "class=\"guides\"", "<line");
-    let guide_y1 = parse_svg_attr_f32(line_tag, "y1=\"");
-    let guide_y2 = parse_svg_attr_f32(line_tag, "y2=\"");
+    let guide_y1 = first_element_attribute_f32(&doc, "guides", "line", "y1");
+    let guide_y2 = first_element_attribute_f32(&doc, "guides", "line", "y2");
 
-    let rect_tag = extract_first_tag(&svg, "class=\"highlights\"", "<rect");
-    let rect_y = parse_svg_attr_f32(rect_tag, "y=\"");
-    let rect_height = parse_svg_attr_f32(rect_tag, "height=\"");
+    let rect_y = first_element_attribute_f32(&doc, "highlights", "rect", "y");
+    let rect_height = first_element_attribute_f32(&doc, "highlights", "rect", "height");
     let rect_bottom = rect_y + rect_height;
 
     // Expected values derived from the layout constants defined above.
@@ -230,14 +286,13 @@ fn t2_with_titles_guide_and_highlight_clipped_to_title_boundaries() {
     // Signal B is the source row (contains | and [...]).
     let source = "@title Top\nA __________\nB __[~~|~~]__\nC __________\n@title Bot\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let line_tag = extract_first_tag(&svg, "class=\"guides\"", "<line");
-    let guide_y1 = parse_svg_attr_f32(line_tag, "y1=\"");
-    let guide_y2 = parse_svg_attr_f32(line_tag, "y2=\"");
+    let guide_y1 = first_element_attribute_f32(&doc, "guides", "line", "y1");
+    let guide_y2 = first_element_attribute_f32(&doc, "guides", "line", "y2");
 
-    let rect_tag = extract_first_tag(&svg, "class=\"highlights\"", "<rect");
-    let rect_y = parse_svg_attr_f32(rect_tag, "y=\"");
-    let rect_height = parse_svg_attr_f32(rect_tag, "height=\"");
+    let rect_y = first_element_attribute_f32(&doc, "highlights", "rect", "y");
+    let rect_height = first_element_attribute_f32(&doc, "highlights", "rect", "height");
     let rect_bottom = rect_y + rect_height;
 
     // Expected values derived from the layout constants defined above.
@@ -310,13 +365,11 @@ fn t2_with_titles_guide_and_highlight_clipped_to_title_boundaries() {
 //   DontCareAlongBus(4,p=false)->25..65; prev=Vertical, next=Vertical
 //   Expected: "25,12 65,12 65,28.8 25,28.8" (unchanged)
 
-fn extract_dontcares_polygon_points(svg: &str) -> String {
-    let layer_start = svg.find("class=\"dontcares\"").expect("dontcares layer");
-    let layer_end = svg[layer_start..].find("</g>").expect("</g>") + layer_start;
-    let layer = &svg[layer_start..layer_end];
-    let points_start = layer.find("points=\"").expect("points attr") + 8;
-    let points_end = layer[points_start..].find('"').expect("closing quote") + points_start;
-    layer[points_start..points_end].to_owned()
+fn extract_dontcares_polygon_points(doc: &Document<'_>) -> String {
+    collect_points_in_layer(doc, "dontcares", "polygon")
+        .into_iter()
+        .next()
+        .expect("dontcares layer must contain at least one <polygon>")
 }
 
 /// `_=?=_` (Low both sides, slant=2): polygon must be `/=\` shape.
@@ -327,7 +380,8 @@ fn extract_dontcares_polygon_points(svg: &str) -> String {
 #[test]
 fn dontcare_bus_via_parser_low_both_sides_slanted_polygon() {
     let svg = render_to_svg("A _=?=_\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "55,15 100,15 105,31.8 50,31.8",
         "_=?=_ polygon must be /=\\ shape, got: {points}"
@@ -342,7 +396,8 @@ fn dontcare_bus_via_parser_low_both_sides_slanted_polygon() {
 #[test]
 fn dontcare_bus_via_parser_high_both_sides_slanted_polygon() {
     let svg = render_to_svg("A ~=?=~\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "50,15 105,15 100,31.8 55,31.8",
         "~=?=~ polygon must be \\=/ shape, got: {points}"
@@ -357,7 +412,8 @@ fn dontcare_bus_via_parser_high_both_sides_slanted_polygon() {
 #[test]
 fn dontcare_bus_via_parser_bus_prev_low_next_right_slant() {
     let svg = render_to_svg("A =?_\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "25,15 50,15 55,31.8 25,31.8",
         "=?_ polygon must have slanted right edge, got: {points}"
@@ -372,7 +428,8 @@ fn dontcare_bus_via_parser_bus_prev_low_next_right_slant() {
 #[test]
 fn dontcare_bus_via_parser_low_prev_bus_next_left_slant() {
     let svg = render_to_svg("A _=?=\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "55,15 100,15 100,31.8 50,31.8",
         "_=?= polygon must have slanted left edge, got: {points}"
@@ -385,7 +442,8 @@ fn dontcare_bus_via_parser_low_prev_bus_next_left_slant() {
 #[test]
 fn dontcare_bus_via_parser_both_continue_stays_rectangle() {
     let svg = render_to_svg("A ==?==\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "25,15 125,15 125,31.8 25,31.8",
         "==?== polygon must be a rectangle, got: {points}"
@@ -400,22 +458,27 @@ fn dontcare_bus_via_parser_both_continue_stays_rectangle() {
 #[test]
 fn dontcare_bus_buscross_both_sides_hexagon() {
     let svg = render_to_svg("A ====X?X====\n");
-    let points = extract_dontcares_polygon_points(&svg);
-    let coords: Vec<f32> = points
-        .split_whitespace()
-        .flat_map(|pair| pair.split(','))
-        .filter_map(|s| s.parse::<f32>().ok())
-        .collect();
-    // 6 points = 12 coordinates: left_cross_mid, left_top, right_top, right_cross_mid,
-    // right_bottom, left_bottom.
-    assert_eq!(
-        coords.len(),
-        12,
-        "must have 6 points (12 coords), got: {points}"
-    );
-    let (left_mid_x, left_top_x) = (coords[0], coords[2]);
-    let (right_top_x, right_mid_x) = (coords[4], coords[6]);
-    let (right_bottom_x, left_bottom_x) = (coords[8], coords[10]);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
+    let vertices = parse_polygon_points(&points);
+    // 6 vertices in document order:
+    //   0: left cross midpoint
+    //   1: left top corner
+    //   2: right top corner
+    //   3: right cross midpoint
+    //   4: right bottom corner
+    //   5: left bottom corner
+    let &[
+        (left_mid_x, _),
+        (left_top_x, _),
+        (right_top_x, _),
+        (right_mid_x, _),
+        (right_bottom_x, _),
+        (left_bottom_x, _),
+    ] = vertices.as_slice()
+    else {
+        panic!("must have 6 vertices, got {vertices:?} (raw: {points})");
+    };
     // Cross midpoints sit slant/2 = 2.5px outside the body corners.
     assert!((left_mid_x - (left_top_x - 2.5)).abs() < 1e-3, "{points}");
     assert!((right_mid_x - (right_top_x + 2.5)).abs() < 1e-3, "{points}");
@@ -431,16 +494,14 @@ fn dontcare_bus_buscross_both_sides_hexagon() {
 #[test]
 fn dontcare_hiz_before_bus_emits_polygon_not_rect() {
     let svg = render_to_svg("A ----????====\n");
-    let layer_start = svg.find("class=\"dontcares\"").expect("dontcares layer");
-    let layer_end = svg[layer_start..].find("</g>").expect("</g>") + layer_start;
-    let layer = &svg[layer_start..layer_end];
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<polygon"),
-        "DontCareAlongHiZ must emit <polygon>, got: {layer}"
+        count_elements_in_layer(&doc, "dontcares", "polygon") > 0,
+        "DontCareAlongHiZ must emit <polygon>, got: {svg}"
     );
     assert!(
-        !layer.contains("<rect"),
-        "DontCareAlongHiZ must not emit <rect>, got: {layer}"
+        count_elements_in_layer(&doc, "dontcares", "rect") == 0,
+        "DontCareAlongHiZ must not emit <rect>, got: {svg}"
     );
 }
 
@@ -459,7 +520,8 @@ fn dontcare_hiz_before_bus_emits_polygon_not_rect() {
 #[test]
 fn dontcare_bus_hiz_both_sides_hexagon() {
     let svg = render_to_svg("A --==?==--\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "75,23.4 80,15 175,15 180,23.4 175,31.8 80,31.8",
         "--==?==-- polygon must be 6-point hexagon, got: {points}"
@@ -474,7 +536,8 @@ fn dontcare_bus_hiz_both_sides_hexagon() {
 #[test]
 fn dontcare_bus_hiz_left_signal_end_right_pentagon() {
     let svg = render_to_svg("A --==?==\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "75,23.4 80,15 175,15 175,31.8 80,31.8",
         "--==?== polygon must be 5-point pentagon (HiZ left), got: {points}"
@@ -488,7 +551,8 @@ fn dontcare_bus_hiz_left_signal_end_right_pentagon() {
 #[test]
 fn dontcare_bus_signal_start_left_hiz_right_pentagon() {
     let svg = render_to_svg("A ==?==--\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "25,15 125,15 130,23.4 125,31.8 25,31.8",
         "==?==-- polygon must be 5-point pentagon (HiZ right), got: {points}"
@@ -503,7 +567,8 @@ fn dontcare_bus_signal_start_left_hiz_right_pentagon() {
 #[test]
 fn dontcare_bus_low_left_signal_end_right_four_point() {
     let svg = render_to_svg("A __==?==\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "80,15 175,15 175,31.8 75,31.8",
         "__==?== polygon must be 4-point (Low left slant), got: {points}"
@@ -517,7 +582,8 @@ fn dontcare_bus_low_left_signal_end_right_four_point() {
 #[test]
 fn dontcare_bus_signal_start_left_low_right_four_point() {
     let svg = render_to_svg("A ==?==__\n");
-    let points = extract_dontcares_polygon_points(&svg);
+    let doc = parse_svg(&svg);
+    let points = extract_dontcares_polygon_points(&doc);
     assert_eq!(
         points, "25,15 125,15 130,31.8 25,31.8",
         "==?==__ polygon must be 4-point (Low right slant), got: {points}"
@@ -537,14 +603,13 @@ fn dontcare_bus_signal_start_left_low_right_four_point() {
 fn clock_auto_expand_endpoint_matches_explicit_waveform() {
     let source = "@clock(none)\nclock\nclock ~_~_~_~_\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let [auto_x, explicit_x, ..] = endpoints.as_slice() else {
         panic!(
-            "expected at least 2 polylines, got {} in: {layer}",
+            "expected at least 2 polylines, got {} in: {svg}",
             endpoints.len()
         );
     };
@@ -568,13 +633,13 @@ fn clock_auto_expand_endpoint_matches_explicit_waveform() {
 fn clock_auto_expand_per_row_step_aligns_right_edge() {
     let source = "@step 20\nClock _~_~_~_~_~_~\n@step 10\n@clock\nclock\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let [explicit_x, auto_x, ..] = endpoints.as_slice() else {
         panic!(
-            "expected at least 2 polylines, got {} in: {layer}",
+            "expected at least 2 polylines, got {} in: {svg}",
             endpoints.len()
         );
     };
@@ -595,13 +660,13 @@ fn clock_auto_expand_per_row_step_aligns_right_edge() {
 fn clock_auto_expand_multiple_auto_rows_reference_only_explicit() {
     let source = "@clock\nclock1\n@clock\nclock2\nSig _~_~_~_~_~_~\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let [auto1_x, auto2_x, sig_x, ..] = endpoints.as_slice() else {
         panic!(
-            "expected at least 3 polylines, got {} in: {layer}",
+            "expected at least 3 polylines, got {} in: {svg}",
             endpoints.len()
         );
     };
@@ -621,13 +686,13 @@ fn clock_auto_expand_multiple_auto_rows_reference_only_explicit() {
 fn clock_auto_expand_explicit_after_auto_is_included() {
     let source = "@clock\nclock\nSig _~_~_~_~_~_~_~_~\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let [auto_x, sig_x, ..] = endpoints.as_slice() else {
         panic!(
-            "expected at least 2 polylines, got {} in: {layer}",
+            "expected at least 2 polylines, got {} in: {svg}",
             endpoints.len()
         );
     };
@@ -643,9 +708,9 @@ fn clock_auto_expand_explicit_after_auto_is_included() {
 fn clock_auto_expand_partial_clock_extends_to_explicit_length() {
     let source = "Sig _~_~_~_~_~_~_~_~\n@clock\nck ~~__\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     // Sig row may produce multiple polylines; ck row follows them.
     // We compare the maximum x across Sig polylines with the last ck endpoint.
@@ -663,9 +728,9 @@ fn clock_auto_expand_partial_clock_extends_to_explicit_length() {
 fn clock_auto_expand_all_auto_produces_empty_waveform() {
     let source = "@clock\nck1\n@clock\nck2\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let polyline_count = layer.matches("<polyline").count();
+    let polyline_count = count_elements_in_layer(&doc, "waveforms", "polyline");
     assert_eq!(
         polyline_count, 0,
         "all-auto chart must produce no polylines, got {polyline_count}"
@@ -681,9 +746,9 @@ fn clock_auto_expand_all_auto_produces_empty_waveform() {
 fn clock_auto_expand_asymmetric_pulse_truncates_at_target() {
     let source = "@clock(_=2, ~=3)\nck\nSig _~_~_~_~_~_~\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     // ck row is first; Sig row follows.
     // Extract last endpoint for ck row and for Sig row.
@@ -704,9 +769,9 @@ fn clock_auto_expand_asymmetric_pulse_truncates_at_target() {
 fn clock_auto_expand_asymmetric_pulse_truncates_mid_high() {
     let source = "@clock(_=2, ~=3)\nck\nSig _~_~_~_~_~_~_\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let sig_x = *endpoints.last().expect("at least one");
     let ck_x = endpoints[0];
@@ -724,9 +789,9 @@ fn clock_auto_expand_asymmetric_pulse_truncates_mid_high() {
 fn clock_auto_expand_start_high_begins_with_high_phase() {
     let source = "@clock(_=2, ~=3, start=high)\nck\nSig _~_~_~_~_~_~\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let sig_x = *endpoints.last().expect("at least one");
     let ck_x = endpoints[0];
@@ -747,13 +812,13 @@ fn clock_auto_expand_start_high_begins_with_high_phase() {
 fn clock_auto_expand_per_row_step_asymmetric_pulse() {
     let source = "@step 20\nSig _~_~_~_~\n@step 10\n@clock(_=2, ~=3)\nck\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let [sig_x, ck_x, ..] = endpoints.as_slice() else {
         panic!(
-            "expected at least 2 polylines, got {} in: {layer}",
+            "expected at least 2 polylines, got {} in: {svg}",
             endpoints.len()
         );
     };
@@ -776,9 +841,9 @@ fn clock_auto_expand_per_row_step_asymmetric_pulse() {
 fn clock_auto_expand_per_row_step_pos_edge_mark_count() {
     let source = "@step 20\nSig _~_~_~_~\n@step 10\n@clock(pos)\nck\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "edge-marks");
-    let polygon_count = layer.matches("<polygon").count();
+    let polygon_count = count_elements_in_layer(&doc, "edge-marks", "polygon");
     assert_eq!(
         polygon_count, 8,
         "16-unit pos-clock must produce 8 rising-edge triangles, got {polygon_count}"
@@ -797,9 +862,9 @@ fn clock_auto_expand_per_row_step_pos_edge_mark_count() {
 fn clock_auto_expand_partial_clock_continues_from_last_state() {
     let source = "Sig _~_~_~_~_~_~_~_~\n@clock(_=2, ~=3)\nck ~~__\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let layer = extract_layer(&svg, "waveforms");
-    let endpoints = extract_polyline_endpoint_x_values(layer);
+    let endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let sig_max_x = endpoints.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let ck_x = *endpoints.last().expect("at least one");
@@ -822,19 +887,13 @@ fn clock_auto_expand_partial_clock_continues_from_last_state() {
 fn step_per_row_first_wider_than_second() {
     let source = "@step 20\nA _~_~_~\n@step 10\nB _~_~_~\n";
     let svg = render_to_svg(source);
+    let doc = parse_svg(&svg);
 
-    let waveforms_open = svg.find("class=\"waveforms\"").expect("waveforms layer");
-    let waveforms_close = svg[waveforms_open..]
-        .find("</g>")
-        .expect("closing </g> for waveforms layer not found")
-        + waveforms_open;
-    let layer = &svg[waveforms_open..waveforms_close];
-
-    let polyline_endpoints = extract_polyline_endpoint_x_values(layer);
+    let polyline_endpoints = extract_polyline_endpoint_x_values(&doc);
 
     let [row1_max_x, row2_max_x, ..] = polyline_endpoints.as_slice() else {
         panic!(
-            "expected at least 2 polylines, got {} in: {layer}",
+            "expected at least 2 polylines, got {} in: {svg}",
             polyline_endpoints.len()
         );
     };
@@ -848,13 +907,12 @@ fn step_per_row_first_wider_than_second() {
 #[test]
 fn integration_per_row_step_changes_subsequent_signal_width() {
     let svg = render_to_svg("@step 10\nSig1 ____\n@step 20\nSig2 ____\n");
-    let waveforms_open = svg.find("class=\"waveforms\"").expect("waveforms");
-    let layer = &svg[waveforms_open..];
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<polyline"),
+        count_elements_in_layer(&doc, "waveforms", "polyline") > 0,
         "polylines must be present in output"
     );
-    let width = parse_svg_attr_f32(&svg, "width=\"");
+    let width = root_attribute_f32(&doc, "width");
     assert!(
         width >= 80.0,
         "chart width must accommodate Sig2 (4 chars * step 20 = 80 + label/margin); got {width}"
@@ -864,8 +922,9 @@ fn integration_per_row_step_changes_subsequent_signal_width() {
 #[test]
 fn integration_per_row_step_with_clock_pos_emits_edge_marks() {
     let svg = render_to_svg("@step 10\n@clock(pos) clk\n@step 20\ndata ====\n");
+    let doc = parse_svg(&svg);
     assert!(
-        svg.contains("<polygon"),
+        has_element_with_tag(&doc, "polygon"),
         "EdgeMark polygon expected; got {svg}"
     );
 }
@@ -873,7 +932,8 @@ fn integration_per_row_step_with_clock_pos_emits_edge_marks() {
 #[test]
 fn integration_clock_auto_then_data_yields_distinct_widths() {
     let svg = render_to_svg("@step 10\n@clock(pos) clk\n@step 20\ndata ====\n");
-    let width = parse_svg_attr_f32(&svg, "width=\"");
+    let doc = parse_svg(&svg);
+    let width = root_attribute_f32(&doc, "width");
     assert!(
         width > 80.0,
         "data row width plus label must exceed 80; got {width}"
@@ -885,25 +945,60 @@ fn integration_dontcare_anchor_arrow_with_color_and_dash() {
     let svg = render_to_svg(
         "@step 10\nSig1 _?@{a}_~\n@step 20\nSig2 ===@{b}===\n@-> (@{a}, @{b}, red, dashed) trans\n",
     );
-    assert!(svg.contains("dontcare-hatch"));
-    assert!(svg.contains("stroke-dasharray"));
+    let doc = parse_svg(&svg);
+    // DontCare hatch pattern: there must be a `<pattern id="dontcare-hatch-*">`
+    // emitted into `<defs>` for the `?` cell.
+    let has_dontcare_pattern = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("pattern"))
+        .any(|node| {
+            node.attribute("id")
+                .is_some_and(|id| id.starts_with("dontcare-hatch"))
+        });
+    assert!(has_dontcare_pattern, "dontcare-hatch <pattern> expected");
+    // Dashed arrow style: at least one element in the arrows layer must carry
+    // a `stroke-dasharray` attribute.
+    let has_dasharray = find_layer_node(&doc, "arrows")
+        .into_iter()
+        .flat_map(|layer| layer.descendants())
+        .any(|node| node.is_element() && node.attribute("stroke-dasharray").is_some());
+    assert!(has_dasharray, "arrow stroke-dasharray expected: {svg}");
 }
 
 #[test]
 fn integration_overline_per_row_step_with_bg() {
     let svg =
         render_to_svg("@step 10\n@bg #ff0\n@signal(overline) nReset _~__\n@step 20\nData ====\n");
-    assert!(svg.contains("<line"));
-    assert!(svg.contains("#ff0") || svg.contains("#FFFF00"));
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "line"));
+    // `@bg #ff0` must surface as a row-background `fill` attribute. The colour
+    // is serialised in canonical hex form; we accept both 3-digit and 6-digit
+    // hex (case-insensitive) by reading the actual `fill` values via the DOM.
+    let yellow_fills = find_layer_node(&doc, "row-backgrounds")
+        .into_iter()
+        .flat_map(|layer| layer.descendants())
+        .filter_map(|node| node.attribute("fill"))
+        .any(|fill| {
+            let lower = fill.to_ascii_lowercase();
+            lower == "#ff0" || lower == "#ffff00"
+        });
+    assert!(
+        yellow_fills,
+        "@bg #ff0 must produce a row-background fill of #ff0 or #ffff00: {svg}"
+    );
 }
 
 #[test]
 fn integration_clock_pulse_with_anchor_and_self_arrow() {
     let svg =
         render_to_svg("@step 10\n@clock(pos, _=2, ~=2) clk\ndata ==@{x}==\n@-> (@{x}, @{x})\n");
-    let arrows_open = svg.find("class=\"arrows\"").unwrap_or(0);
-    let arrows = &svg[arrows_open..];
-    assert!(arrows.contains("<line") || arrows.contains("<path"));
+    let doc = parse_svg(&svg);
+    assert!(
+        count_elements_in_layer(&doc, "arrows", "line") > 0
+            || count_elements_in_layer(&doc, "arrows", "path") > 0,
+        "arrows layer must contain a <line> or <path>: {svg}"
+    );
 }
 
 #[test]
@@ -911,7 +1006,21 @@ fn integration_bgcolor_skip_title_mixed_index_assignment() {
     let svg = render_to_svg(
         "@bgcolor0 #eee\n@bgcolor1 #ccc\nSig1 _~\n@skip(1)\n@title \"Mid\"\nSig2 _~\n@bg #f0f\nSig3 _~\n",
     );
-    assert!(svg.contains("#f0f") || svg.contains("#FF00FF"));
+    let doc = parse_svg(&svg);
+    // The trailing `@bg #f0f` must apply to Sig3 as a row-background `fill`.
+    // Hex literal may serialise as `#f0f` or `#ff00ff` (case-insensitive).
+    let magenta_present = find_layer_node(&doc, "row-backgrounds")
+        .into_iter()
+        .flat_map(|layer| layer.descendants())
+        .filter_map(|node| node.attribute("fill"))
+        .any(|fill| {
+            let lower = fill.to_ascii_lowercase();
+            lower == "#f0f" || lower == "#ff00ff"
+        });
+    assert!(
+        magenta_present,
+        "Sig3 @bg #f0f must produce a row-background fill of #f0f or #ff00ff: {svg}"
+    );
 }
 
 #[test]
@@ -919,16 +1028,35 @@ fn integration_dontcare_color_recurrence_shares_pattern_id() {
     let svg = render_to_svg(
         "@dontcare_color #c00\nA _?_\n@dontcare_color #06c\nB _?_\n@dontcare_color #c00\nC _?_\n",
     );
-    assert!(svg.contains("dontcare-hatch-1"));
-    assert!(svg.contains("dontcare-hatch-2"));
+    let doc = parse_svg(&svg);
+    // Two distinct dontcare colours must allocate exactly the IDs
+    // `dontcare-hatch-1` and `dontcare-hatch-2`; the recurring colour `#c00`
+    // must share its pattern with the first occurrence (no `-3` ID).
+    let pattern_ids: Vec<String> = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("pattern"))
+        .filter_map(|node| node.attribute("id").map(str::to_owned))
+        .collect();
+    assert!(
+        pattern_ids.iter().any(|id| id == "dontcare-hatch-1"),
+        "dontcare-hatch-1 must be defined: {pattern_ids:?}"
+    );
+    assert!(
+        pattern_ids.iter().any(|id| id == "dontcare-hatch-2"),
+        "dontcare-hatch-2 must be defined: {pattern_ids:?}"
+    );
 }
 
 #[test]
 fn integration_named_and_numbered_anchors_resolve_in_arrow() {
     let svg = render_to_svg("Sig1 _~@{start}_~\nSig2 ===@1===\n@-> (@{start}, @1) flow\n");
-    let arrows_open = svg.find("class=\"arrows\"").expect("arrows");
-    let arrows = &svg[arrows_open..];
-    assert!(arrows.contains("<line") || arrows.contains("<path"));
+    let doc = parse_svg(&svg);
+    assert!(
+        count_elements_in_layer(&doc, "arrows", "line") > 0
+            || count_elements_in_layer(&doc, "arrows", "path") > 0,
+        "arrows layer must contain a <line> or <path>: {svg}"
+    );
 }
 
 #[test]
@@ -936,30 +1064,50 @@ fn integration_multiline_overline_anchor_and_arrow_combination() {
     let svg = render_to_svg(
         "@bg #ff0\n@signal(overline)\n\"n\\nReset\"  ___@{r}___\nData        ===@{d}===\n@-> (@{r}, @{d})\n",
     );
-    assert!(svg.contains("<line"));
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "line"));
 }
 
 #[test]
 fn integration_named_versus_numbered_anchor_distinct_targets() {
     let svg = render_to_svg("Sig1 _~@1_~@{1}_\n@-> (@1, @{1})\n");
-    let arrows_open = svg.find("class=\"arrows\"").expect("arrows");
-    let arrows = &svg[arrows_open..];
-    assert!(arrows.contains("<line") || arrows.contains("<path"));
+    let doc = parse_svg(&svg);
+    assert!(
+        count_elements_in_layer(&doc, "arrows", "line") > 0
+            || count_elements_in_layer(&doc, "arrows", "path") > 0,
+        "arrows layer must contain a <line> or <path>: {svg}"
+    );
 }
 
 #[test]
 fn integration_highlight_dontcare_anchor_clock_combine() {
     let svg = render_to_svg("@clock(pos) clk\ndata __[?@{a}?]__\n");
-    assert!(svg.contains("<polygon"), "EdgeMark polygon expected");
-    assert!(svg.contains("dontcare-hatch"));
+    let doc = parse_svg(&svg);
+    assert!(
+        has_element_with_tag(&doc, "polygon"),
+        "EdgeMark polygon expected"
+    );
+    // The hatch pattern must be defined as a `<pattern id="dontcare-hatch-*">`
+    // inside the rendered defs.
+    let has_dontcare_pattern = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("pattern"))
+        .any(|node| {
+            node.attribute("id")
+                .is_some_and(|id| id.starts_with("dontcare-hatch"))
+        });
+    assert!(has_dontcare_pattern, "dontcare-hatch <pattern> expected");
 }
 
 #[test]
 fn integration_scale_with_per_row_step_affects_svg_width() {
     let scaled = render_to_svg("@scale 2.0\n@step 10\nA ____\n@step 20\nB ____\n");
+    let scaled_doc = parse_svg(&scaled);
     let plain = render_to_svg("@step 10\nA ____\n@step 20\nB ____\n");
-    let scaled_w = parse_svg_attr_f32(&scaled, "width=\"");
-    let plain_w = parse_svg_attr_f32(&plain, "width=\"");
+    let plain_doc = parse_svg(&plain);
+    let scaled_w = root_attribute_f32(&scaled_doc, "width");
+    let plain_w = root_attribute_f32(&plain_doc, "width");
     assert!(
         scaled_w > plain_w,
         "scaled chart must have larger width; got {plain_w} -> {scaled_w}"
@@ -968,18 +1116,12 @@ fn integration_scale_with_per_row_step_affects_svg_width() {
     // the viewport actually scales when width/height are larger than the
     // logical coordinate system. Without viewBox the canvas would just be
     // bigger with the original-size drawing pinned to the top-left.
-    let expected_view_box = format!("viewBox=\"0 0 {plain_w} ");
-    assert!(
-        scaled.contains(&expected_view_box),
-        "scaled SVG must emit viewBox starting with internal width \
-         {plain_w}; got: {scaled}"
-    );
-    let plain_height = parse_svg_attr_f32(&plain, "height=\"");
-    let scaled_view_box_full = format!("viewBox=\"0 0 {plain_w} {plain_height}\"");
-    assert!(
-        scaled.contains(&scaled_view_box_full),
-        "scaled SVG viewBox must match internal width/height \
-         ({plain_w} x {plain_height}); got: {scaled}"
+    let plain_height = root_attribute_f32(&plain_doc, "height");
+    let view_box = root_attribute(&scaled_doc, "viewBox");
+    let expected = format!("0 0 {plain_w} {plain_height}");
+    assert_eq!(
+        view_box, expected,
+        "scaled SVG viewBox must match internal width/height ({plain_w} x {plain_height}); got viewBox={view_box:?}"
     );
 }
 
@@ -988,12 +1130,14 @@ fn integration_viewbox_present_without_scale_directive() {
     // Plain chart (no @scale): width/height equal internal dimensions, but
     // viewBox must still be emitted so consumers can rely on its presence.
     let svg = render_to_svg("@step 10\nA ____\n");
-    let width = parse_svg_attr_f32(&svg, "width=\"");
-    let height = parse_svg_attr_f32(&svg, "height=\"");
-    let expected = format!("viewBox=\"0 0 {width} {height}\"");
-    assert!(
-        svg.contains(&expected),
-        "SVG must emit viewBox=\"0 0 W H\"; expected {expected}, got: {svg}"
+    let doc = parse_svg(&svg);
+    let width = root_attribute_f32(&doc, "width");
+    let height = root_attribute_f32(&doc, "height");
+    let view_box = root_attribute(&doc, "viewBox");
+    let expected = format!("0 0 {width} {height}");
+    assert_eq!(
+        view_box, expected,
+        "SVG must emit viewBox=\"0 0 W H\"; expected {expected}, got viewBox={view_box:?}"
     );
 }
 
@@ -1002,11 +1146,13 @@ fn integration_scale_emits_viewbox_with_internal_dimensions() {
     // viewBox values are the pre-scale (logical) dimensions; width/height
     // attributes are the post-scale (display) dimensions.
     let scaled = render_to_svg("@scale 3.0\nA _~\n");
+    let scaled_doc = parse_svg(&scaled);
     let plain = render_to_svg("A _~\n");
-    let plain_width = parse_svg_attr_f32(&plain, "width=\"");
-    let plain_height = parse_svg_attr_f32(&plain, "height=\"");
-    let scaled_width = parse_svg_attr_f32(&scaled, "width=\"");
-    let scaled_height = parse_svg_attr_f32(&scaled, "height=\"");
+    let plain_doc = parse_svg(&plain);
+    let plain_width = root_attribute_f32(&plain_doc, "width");
+    let plain_height = root_attribute_f32(&plain_doc, "height");
+    let scaled_width = root_attribute_f32(&scaled_doc, "width");
+    let scaled_height = root_attribute_f32(&scaled_doc, "height");
     // Display size is 3x larger.
     let width_ratio = scaled_width / plain_width;
     let height_ratio = scaled_height / plain_height;
@@ -1019,37 +1165,51 @@ fn integration_scale_emits_viewbox_with_internal_dimensions() {
         "scaled height must be 3x plain; got ratio {height_ratio}"
     );
     // viewBox stays at the internal (1x) dimensions.
-    let expected = format!("viewBox=\"0 0 {plain_width} {plain_height}\"");
-    assert!(
-        scaled.contains(&expected),
-        "scaled SVG viewBox must equal plain dimensions; expected {expected}, got: {scaled}"
+    let view_box = root_attribute(&scaled_doc, "viewBox");
+    let expected = format!("0 0 {plain_width} {plain_height}");
+    assert_eq!(
+        view_box, expected,
+        "scaled SVG viewBox must equal plain dimensions; expected {expected}, got viewBox={view_box:?}"
     );
 }
 
 #[test]
 fn integration_unknown_font_warning_does_not_abort_render() {
     let svg = render_to_svg("@font NoSuchFont\nSig _\n");
-    assert!(
-        svg.contains("<svg "),
-        "render must succeed even with bad font"
-    );
+    // Bad font must still produce a parsable SVG document.
+    assert_eq!(parse_svg(&svg).root_element().tag_name().name(), "svg");
 }
 
 #[test]
 fn integration_arrow_label_with_xml_special_chars_is_escaped() {
     let svg = render_to_svg("A _~@{a}_\nB _~@{b}_\n@-> (@{a}, @{b}) <signal-set>\n");
-    let arrows_open = svg.find("class=\"arrows\"").expect("arrows");
-    let arrows = &svg[arrows_open..];
+    // Walk all `<text>` elements in the arrows layer and confirm one carries
+    // the literal label content — roxmltree returns the *decoded* text, so the
+    // expected string is the un-entity-escaped original. This guards against
+    // a regression that would have surfaced the label without escaping (which
+    // would have made the XML unparsable in the first place — already caught
+    // by `parse_svg`).
+    let doc = parse_svg(&svg);
+    let layer = find_layer_node(&doc, "arrows").expect("arrows layer must exist");
+    let found_label = layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("text"))
+        .any(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .any(|child| child.text() == Some("<signal-set>"))
+        });
     assert!(
-        arrows.contains("&lt;signal-set&gt;"),
-        "label must be XML-escaped; got {arrows}"
+        found_label,
+        "arrow label text must be present in <text>: {svg}"
     );
 }
 
 #[test]
 fn integration_regression_per_row_step_change_not_sticky() {
     let svg = render_to_svg("@step 10\nSig1 ____\n@step 20\nSig2 ____\n");
-    let width = parse_svg_attr_f32(&svg, "width=\"");
+    let doc = parse_svg(&svg);
+    let width = root_attribute_f32(&doc, "width");
     assert!(
         width >= 80.0,
         "width must reflect Sig2 step=20 (>=80); got {width}"
@@ -1059,13 +1219,15 @@ fn integration_regression_per_row_step_change_not_sticky() {
 #[test]
 fn integration_regression_anchor_position_uses_local_step() {
     let svg = render_to_svg("@step 10\nSig1 ___@1__\n@step 20\nSig2 ___@2__\n");
-    assert!(svg.contains("<svg"));
+    // The rendered SVG must parse cleanly as XML with `<svg>` as the root.
+    assert_eq!(parse_svg(&svg).root_element().tag_name().name(), "svg");
 }
 
 #[test]
 fn integration_regression_clock_auto_with_subsequent_step_change() {
     let svg = render_to_svg("@step 10\n@clock(pos) clk\n@step 20\ndata ====\n");
-    let width = parse_svg_attr_f32(&svg, "width=\"");
+    let doc = parse_svg(&svg);
+    let width = root_attribute_f32(&doc, "width");
     assert!(
         width >= 80.0,
         "data step=20 must dominate chart width; got {width}"
@@ -1080,10 +1242,9 @@ fn integration_regression_clock_auto_with_subsequent_step_change() {
 fn iter1_consecutive_anchors_with_three_arrows_render_three_lines() {
     let svg =
         render_to_svg("A _@{a}@{b}@{c}~\n@-> (@{a}, @{b})\n@-> (@{b}, @{c})\n@-> (@{a}, @{c})\n");
-    let arrows_open = svg.find("class=\"arrows\"").expect("arrows layer");
-    let arrows_close = svg[arrows_open..].find("</g>").expect("close") + arrows_open;
-    let layer = &svg[arrows_open..arrows_close];
-    let line_count = layer.matches("<line").count() + layer.matches("<path").count();
+    let doc = parse_svg(&svg);
+    let line_count = count_elements_in_layer(&doc, "arrows", "line")
+        + count_elements_in_layer(&doc, "arrows", "path");
     assert!(
         line_count >= 3,
         "expected at least 3 arrow shapes; got {line_count}"
@@ -1093,17 +1254,16 @@ fn iter1_consecutive_anchors_with_three_arrows_render_three_lines() {
 #[test]
 fn iter1_arrow_self_loop_renders_without_panic() {
     let svg = render_to_svg("A _@{a}~\n@-> (@{a}, @{a})\n");
+    let doc = parse_svg(&svg);
     assert!(
-        svg.contains("class=\"arrows\""),
+        has_layer(&doc, "arrows"),
         "arrows layer must be present for a self-loop arrow: {svg}"
     );
-    let arrows_open = svg.find("class=\"arrows\"").expect("arrows layer");
-    let arrows_close = svg[arrows_open..].find("</g>").expect("close </g>") + arrows_open;
-    let layer = &svg[arrows_open..arrows_close];
-    let shape_count = layer.matches("<line").count() + layer.matches("<path").count();
+    let shape_count = count_elements_in_layer(&doc, "arrows", "line")
+        + count_elements_in_layer(&doc, "arrows", "path");
     assert!(
         shape_count >= 1,
-        "self-loop must emit at least one <line> or <path>; got {shape_count} in {layer}"
+        "self-loop must emit at least one <line> or <path>; got {shape_count} in {svg}"
     );
 }
 
@@ -1120,23 +1280,24 @@ fn iter1_one_hundred_arrows_render() {
         source.push_str(&format!("@-> (@{{a{index}}}, @{{a{}}})\n", index + 1));
     }
     let svg = render_to_svg(&source);
-    let arrows_open = svg.find("class=\"arrows\"").unwrap_or_else(|| {
-        panic!("arrows group must exist when 100 @-> arrows are present: {svg}")
-    });
-    let arrows_close = svg[arrows_open..].find("</g>").expect("close </g>") + arrows_open;
-    let layer = &svg[arrows_open..arrows_close];
-    let shape_count = layer.matches("<line").count() + layer.matches("<path").count();
+    let doc = parse_svg(&svg);
+    assert!(
+        has_layer(&doc, "arrows"),
+        "arrows group must exist when 100 @-> arrows are present: {svg}"
+    );
+    let shape_count = count_elements_in_layer(&doc, "arrows", "line")
+        + count_elements_in_layer(&doc, "arrows", "path");
     assert!(
         shape_count >= 100,
-        "expected at least 100 arrow shapes; got {shape_count} in {layer}"
+        "expected at least 100 arrow shapes; got {shape_count} in {svg}"
     );
 }
 
 #[test]
 fn iter1_clock_none_does_not_emit_polygon() {
     let svg = render_to_svg("@clock(none)\nclk _~_~\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    let polygon_count = waveforms.matches("<polygon").count();
+    let doc = parse_svg(&svg);
+    let polygon_count = count_elements_in_layer(&doc, "waveforms", "polygon");
     assert_eq!(
         polygon_count, 0,
         "@clock(none) must not emit edge mark polygon; got {polygon_count}"
@@ -1148,12 +1309,11 @@ fn iter1_clock_with_fifty_edges_z_order_arrows_after_waveforms() {
     let body: String = "_~".repeat(50);
     let source = format!("@clock(pos)\nclk {body}\nA _@{{a}}@{{b}}_\n@-> (@{{a}}, @{{b}})\n");
     let svg = render_to_svg(&source);
-    let waveforms_pos = svg
-        .find("class=\"waveforms\"")
-        .unwrap_or_else(|| panic!("waveforms group must be present for signal input: {svg}"));
-    let arrows_pos = svg
-        .find("class=\"arrows\"")
-        .unwrap_or_else(|| panic!("arrows group must be present for @-> input: {svg}"));
+    let doc = parse_svg(&svg);
+    let waveforms_pos = layer_document_index(&doc, "waveforms")
+        .unwrap_or_else(|| panic!("waveforms group must be present: {svg}"));
+    let arrows_pos = layer_document_index(&doc, "arrows")
+        .unwrap_or_else(|| panic!("arrows group must be present: {svg}"));
     assert!(
         waveforms_pos < arrows_pos,
         "waveforms must precede arrows in document order; got waveforms={waveforms_pos} vs arrows={arrows_pos}"
@@ -1167,16 +1327,11 @@ fn iter1_clock_with_fifty_edges_z_order_arrows_after_waveforms() {
 #[test]
 fn iter1_empty_tcml_yields_minimal_svg_frame() {
     let svg = render_to_svg("");
-    assert!(
-        svg.trim_start().starts_with("<svg") || svg.trim_start().starts_with("<?xml"),
-        "SVG output must start with <svg> (or XML declaration); got {svg:?}"
-    );
-    assert!(
-        svg.contains("</svg>"),
-        "SVG must include closing tag: {svg:?}"
-    );
-    let width = parse_svg_attr_f32(&svg, "width=\"");
-    let height = parse_svg_attr_f32(&svg, "height=\"");
+    let doc = parse_svg(&svg);
+    // Document must parse as XML rooted at <svg>.
+    assert_eq!(parse_svg(&svg).root_element().tag_name().name(), "svg");
+    let width = root_attribute_f32(&doc, "width");
+    let height = root_attribute_f32(&doc, "height");
     assert!(
         width.is_finite() && width > 0.0,
         "minimal SVG frame must have a positive finite width; got {width}"
@@ -1190,13 +1345,25 @@ fn iter1_empty_tcml_yields_minimal_svg_frame() {
 #[test]
 fn iter1_title_only_renders_title_text() {
     let svg = render_to_svg("@title \"T\"\n");
-    assert!(svg.contains(">T<"), "title text 'T' must be present: {svg}");
+    // Confirm a `<text>` element somewhere carries the literal "T".
+    let doc = parse_svg(&svg);
+    let has_title = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("text"))
+        .any(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .any(|child| child.text() == Some("T"))
+        });
+    assert!(has_title, "title text 'T' must be present: {svg}");
 }
 
 #[test]
 fn iter1_scale_one_thousand_does_not_overflow() {
     let svg = render_to_svg("@scale 1000\nA _~\n");
-    let width = parse_svg_attr_f32(&svg, "width=\"");
+    let doc = parse_svg(&svg);
+    let width = root_attribute_f32(&doc, "width");
     assert!(width.is_finite(), "width must be finite; got {width}");
     assert!(width > 0.0, "width must be positive; got {width}");
 }
@@ -1204,14 +1371,18 @@ fn iter1_scale_one_thousand_does_not_overflow() {
 #[test]
 fn iter1_fontsize_half_keeps_label_layout_positive() {
     let svg = render_to_svg("@fontsize 0.5\nA _~\n");
-    assert!(svg.contains("<text"), "label text must be rendered: {svg}");
+    let doc = parse_svg(&svg);
+    assert!(
+        has_element_with_tag(&doc, "text"),
+        "label text must be rendered: {svg}"
+    );
 }
 
 #[test]
 fn iter1_one_character_waveform_renders_polyline() {
     let svg = render_to_svg("A _\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    let polyline_count = waveforms.matches("<polyline").count();
+    let doc = parse_svg(&svg);
+    let polyline_count = count_elements_in_layer(&doc, "waveforms", "polyline");
     assert!(
         polyline_count >= 1,
         "single-char waveform must produce one polyline; got {polyline_count}"
@@ -1226,25 +1397,59 @@ fn iter1_one_character_waveform_renders_polyline() {
 fn iter1_round_trip_source_field_preserves_input() {
     let source = "@scale 2.0\nA _~\n";
     let svg = render_to_svg(source);
-    let trimmed = source.trim_end_matches('\n');
-    assert!(
-        svg.contains(trimmed),
-        "TCML source must be embedded verbatim in SVG; got {svg}"
+    let doc = parse_svg(&svg);
+    // The TCML source must round-trip verbatim into the `<tchart:source>`
+    // metadata element. roxmltree decodes the entity-escaped text back to the
+    // raw characters, so equality on the resulting text node is equivalent
+    // to embedding the original source.
+    let source_text: String = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("source"))
+        .map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect()
+        })
+        .expect("<tchart:source> must be present");
+    assert_eq!(
+        source_text, source,
+        "TCML source must be embedded verbatim in <tchart:source>: {svg}"
     );
 }
 
 #[test]
 fn iter1_multibyte_signal_name_round_trip_safe() {
     let svg = render_to_svg("\"日本語\" _~\n");
+    let doc = parse_svg(&svg);
+    // A multi-byte signal name must survive parser → renderer round-trip and
+    // appear as the text content of a `<text>` element inside `signal-labels`.
+    let layer = find_layer_node(&doc, "signal-labels").expect("signal-labels layer must exist");
+    let has_multibyte_label = layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("text"))
+        .any(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .any(|child| child.text() == Some("日本語"))
+        });
     assert!(
-        svg.contains("日本語"),
-        "multi-byte signal name must survive UTF-8 encoding: {svg}"
+        has_multibyte_label,
+        "multi-byte signal name must appear as <text> content in signal-labels: {svg}"
     );
 }
 
 #[test]
 fn iter1_cdata_terminator_in_comment_uses_entity_escape() {
     let svg = render_to_svg("// ]]> marker\nA _\n");
+    // Two byte-level invariants are intentionally verified against the raw
+    // SVG string rather than the DOM:
+    //   (1) the renderer must NEVER emit a `<![CDATA[` section — once parsed
+    //       by roxmltree this would not show up in any element/text contents.
+    //   (2) the literal `>` from `]]>` in TCML must be entity-escaped to
+    //       `&gt;` (verifiable only on the raw bytes; roxmltree decodes the
+    //       entity back to `>` for text contents).
     assert!(
         !svg.contains("<![CDATA["),
         "must not use CDATA section: {svg}"
@@ -1287,19 +1492,8 @@ fn render_slant10_step25(body: &str) -> String {
 
 /// Extract every `<polygon points="...">` points-string from the dontcares
 /// layer, in document order. Returns one entry per polygon.
-fn extract_all_dontcares_polygons(svg: &str) -> Vec<String> {
-    let layer = extract_layer(svg, "dontcares");
-    let mut result = Vec::new();
-    let mut rest = layer;
-    while let Some(open) = rest.find("<polygon points=\"") {
-        let after_open = &rest[open + "<polygon points=\"".len()..];
-        let Some(close) = after_open.find('"') else {
-            break;
-        };
-        result.push(after_open[..close].to_owned());
-        rest = &after_open[close..];
-    }
-    result
+fn extract_all_dontcares_polygons(doc: &Document<'_>) -> Vec<String> {
+    collect_points_in_layer(doc, "dontcares", "polygon")
 }
 
 /// Parse a `<polygon>`'s points string into a list of (x, y) pairs.
@@ -1336,29 +1530,19 @@ fn assert_polygon_eq(got: &str, expected: &[(f32, f32)], label: &str) {
 }
 
 /// Extract every `<polyline points="...">` points string from the waveforms layer.
-fn extract_all_waveform_polylines(svg: &str) -> Vec<String> {
-    let layer = extract_layer(svg, "waveforms");
-    let mut result = Vec::new();
-    let mut rest = layer;
-    while let Some(open) = rest.find("<polyline") {
-        let after_polyline = &rest[open..];
-        let Some(points_offset) = after_polyline.find("points=\"") else {
-            break;
-        };
-        let after_open = &after_polyline[points_offset + "points=\"".len()..];
-        let Some(close) = after_open.find('"') else {
-            break;
-        };
-        result.push(after_open[..close].to_owned());
-        rest = &after_open[close..];
-    }
-    result
+fn extract_all_waveform_polylines(doc: &Document<'_>) -> Vec<String> {
+    collect_points_in_layer(doc, "waveforms", "polyline")
 }
 
 /// Assert that the rendered waveform contains a polyline segment from
 /// `(from_x, from_y)` to `(to_x, to_y)` (i.e., two consecutive points).
-fn assert_polyline_contains_segment(svg: &str, from: (f32, f32), to: (f32, f32), label: &str) {
-    let polylines = extract_all_waveform_polylines(svg);
+fn assert_polyline_contains_segment(
+    doc: &Document<'_>,
+    from: (f32, f32),
+    to: (f32, f32),
+    label: &str,
+) {
+    let polylines = extract_all_waveform_polylines(doc);
     let (from_x, from_y) = from;
     let (to_x, to_y) = to;
     for points_string in &polylines {
@@ -1387,7 +1571,8 @@ fn assert_polyline_contains_segment(svg: &str, from: (f32, f32), to: (f32, f32),
 fn issue1_dc_low_start_end_rectangle() {
     // `_?` → DC-Low(1) at grid [25, 50]. No adjacent transitions.
     let svg = render_slant10_step25("_?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     assert_eq!(
         polygons.len(),
         1,
@@ -1412,7 +1597,8 @@ fn issue1_dc_low_start_pos_right_trapezoid() {
     // `_?~` → DC-Low(1) [25, 50], SingleEdge(Pos), High(1) preceded.
     // Polygon: (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a, y_l).
     let svg = render_slant10_step25("_?~");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1433,7 +1619,8 @@ fn issue1_dc_low_start_pos_half_pentagon() {
     // `_?-` → DC-Low(1), SingleEdge(Pos-half to HiZ), HiZ(1).
     // Polygon: (x_a, y_h), (x_b+s, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l).
     let svg = render_slant10_step25("_?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1454,7 +1641,8 @@ fn issue1_dc_low_start_pos_half_pentagon() {
 fn issue1_dc_low_start_busopen_right_trapezoid() {
     // `_?=` → DC-Low(1), BusOpen-from-Low, Bus(1).
     let svg = render_slant10_step25("_?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1476,7 +1664,8 @@ fn issue1_dc_low_neg_left_trapezoid() {
     // DC grid: x_a = 25 + 25 = 50, x_b = 75.
     // Polygon: (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l).
     let svg = render_slant10_step25("~_?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1497,7 +1686,8 @@ fn issue1_dc_low_neg_left_pos_right_parallelogram() {
     // `~_?~` → High(1), Neg, DC-Low(1), Pos, High(1).
     // x_a=50, x_b=75.
     let svg = render_slant10_step25("~_?~");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1517,7 +1707,8 @@ fn issue1_dc_low_neg_left_pos_right_parallelogram() {
 fn issue1_dc_low_neg_left_pos_half_right_pentagon() {
     // `~_?-` → High(1), Neg, DC-Low(1), Pos-half to HiZ, HiZ(1).
     let svg = render_slant10_step25("~_?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1538,7 +1729,8 @@ fn issue1_dc_low_neg_left_pos_half_right_pentagon() {
 fn issue1_dc_low_neg_left_busopen_right_parallelogram() {
     // `~_?=` → High(1), Neg, DC-Low(1), BusOpen-from-Low, Bus(1).
     let svg = render_slant10_step25("~_?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1559,7 +1751,8 @@ fn issue1_dc_low_neg_half_left_end_pentagon() {
     // `-_?` → HiZ(1), Neg-half, DC-Low(1).
     // Polygon: (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid).
     let svg = render_slant10_step25("-_?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1580,7 +1773,8 @@ fn issue1_dc_low_neg_half_left_end_pentagon() {
 fn issue1_dc_low_neg_half_left_pos_right_pentagon() {
     // `-_?~` → HiZ(1), Neg-half, DC-Low(1), Pos, High(1).
     let svg = render_slant10_step25("-_?~");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1601,7 +1795,8 @@ fn issue1_dc_low_neg_half_left_pos_right_pentagon() {
 fn issue1_dc_low_neg_half_left_pos_half_right_hexagon() {
     // `-_?-` → HiZ(1), Neg-half, DC-Low(1), Pos-half, HiZ(1).
     let svg = render_slant10_step25("-_?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1623,7 +1818,8 @@ fn issue1_dc_low_neg_half_left_pos_half_right_hexagon() {
 fn issue1_dc_low_neg_half_left_busopen_right_pentagon() {
     // `-_?=` → HiZ(1), Neg-half, DC-Low(1), BusOpen-from-Low, Bus(1).
     let svg = render_slant10_step25("-_?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1644,7 +1840,8 @@ fn issue1_dc_low_neg_half_left_busopen_right_pentagon() {
 fn issue1_dc_low_busclose_left_end_trapezoid() {
     // `=_?` → Bus(1), BusClose-to-Low, DC-Low(1).
     let svg = render_slant10_step25("=_?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1664,7 +1861,8 @@ fn issue1_dc_low_busclose_left_end_trapezoid() {
 fn issue1_dc_low_busclose_left_pos_right_parallelogram() {
     // `=_?~` → Bus(1), BusClose-to-Low, DC-Low(1), Pos, High(1).
     let svg = render_slant10_step25("=_?~");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1684,7 +1882,8 @@ fn issue1_dc_low_busclose_left_pos_right_parallelogram() {
 fn issue1_dc_low_busclose_left_pos_half_right_pentagon() {
     // `=_?-` → Bus(1), BusClose, DC-Low(1), Pos-half, HiZ(1).
     let svg = render_slant10_step25("=_?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1705,7 +1904,8 @@ fn issue1_dc_low_busclose_left_pos_half_right_pentagon() {
 fn issue1_dc_low_busclose_left_busopen_right_parallelogram() {
     // `=_?=` → Bus(1), BusClose, DC-Low(1), BusOpen, Bus(1).
     let svg = render_slant10_step25("=_?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1726,7 +1926,8 @@ fn issue1_dc_low_busclose_left_busopen_right_parallelogram() {
 #[test]
 fn issue1_dc_high_start_end_rectangle() {
     let svg = render_slant10_step25("~?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     assert_polygon_eq(
@@ -1745,7 +1946,8 @@ fn issue1_dc_high_start_end_rectangle() {
 fn issue1_dc_high_start_neg_right_trapezoid() {
     // `~?_` → DC-High(1), Neg, Low(1).
     let svg = render_slant10_step25("~?_");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1765,7 +1967,8 @@ fn issue1_dc_high_start_neg_right_trapezoid() {
 fn issue1_dc_high_start_neg_half_right_pentagon() {
     // `~?-` → DC-High(1), Neg-half, HiZ(1).
     let svg = render_slant10_step25("~?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1786,7 +1989,8 @@ fn issue1_dc_high_start_neg_half_right_pentagon() {
 fn issue1_dc_high_start_busopen_right_trapezoid() {
     // `~?=` → DC-High(1), BusOpen-from-High, Bus(1).
     let svg = render_slant10_step25("~?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1806,7 +2010,8 @@ fn issue1_dc_high_start_busopen_right_trapezoid() {
 fn issue1_dc_high_pos_left_end_trapezoid() {
     // `_~?` → Low(1), Pos, DC-High(1).
     let svg = render_slant10_step25("_~?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1826,7 +2031,8 @@ fn issue1_dc_high_pos_left_end_trapezoid() {
 fn issue1_dc_high_pos_left_neg_right_parallelogram() {
     // `_~?_` → Low(1), Pos, DC-High(1), Neg, Low(1).
     let svg = render_slant10_step25("_~?_");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1845,7 +2051,8 @@ fn issue1_dc_high_pos_left_neg_right_parallelogram() {
 #[test]
 fn issue1_dc_high_pos_left_neg_half_right_pentagon() {
     let svg = render_slant10_step25("_~?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1865,7 +2072,8 @@ fn issue1_dc_high_pos_left_neg_half_right_pentagon() {
 #[test]
 fn issue1_dc_high_pos_left_busopen_right_parallelogram() {
     let svg = render_slant10_step25("_~?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1884,7 +2092,8 @@ fn issue1_dc_high_pos_left_busopen_right_parallelogram() {
 #[test]
 fn issue1_dc_high_pos_half_left_end_pentagon() {
     let svg = render_slant10_step25("-~?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1904,7 +2113,8 @@ fn issue1_dc_high_pos_half_left_end_pentagon() {
 #[test]
 fn issue1_dc_high_pos_half_left_neg_right_pentagon() {
     let svg = render_slant10_step25("-~?_");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1924,7 +2134,8 @@ fn issue1_dc_high_pos_half_left_neg_right_pentagon() {
 #[test]
 fn issue1_dc_high_pos_half_left_neg_half_right_hexagon() {
     let svg = render_slant10_step25("-~?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1945,7 +2156,8 @@ fn issue1_dc_high_pos_half_left_neg_half_right_hexagon() {
 #[test]
 fn issue1_dc_high_pos_half_left_busopen_right_pentagon() {
     let svg = render_slant10_step25("-~?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1965,7 +2177,8 @@ fn issue1_dc_high_pos_half_left_busopen_right_pentagon() {
 #[test]
 fn issue1_dc_high_busclose_left_end_trapezoid() {
     let svg = render_slant10_step25("=~?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -1984,7 +2197,8 @@ fn issue1_dc_high_busclose_left_end_trapezoid() {
 #[test]
 fn issue1_dc_high_busclose_left_neg_right_parallelogram() {
     let svg = render_slant10_step25("=~?_");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2003,7 +2217,8 @@ fn issue1_dc_high_busclose_left_neg_right_parallelogram() {
 #[test]
 fn issue1_dc_high_busclose_left_neg_half_right_pentagon() {
     let svg = render_slant10_step25("=~?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2023,7 +2238,8 @@ fn issue1_dc_high_busclose_left_neg_half_right_pentagon() {
 #[test]
 fn issue1_dc_high_busclose_left_busopen_right_parallelogram() {
     let svg = render_slant10_step25("=~?=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2044,11 +2260,11 @@ fn issue1_dc_high_busclose_left_busopen_right_parallelogram() {
 // DC-HiZ is always a rectangle but emitted as a 4-vertex `<polygon>` per the
 // new spec. Adjacent half-slants stay in the waveform polylines.
 
-fn assert_dc_hiz_rect(svg: &str, x: f32, width: f32, label: &str) {
-    let polygons = extract_all_dontcares_polygons(svg);
+fn assert_dc_hiz_rect(doc: &Document<'_>, x: f32, width: f32, label: &str) {
+    let polygons = extract_all_dontcares_polygons(doc);
     assert!(
         !polygons.is_empty(),
-        "{label}: expected at least one DC-HiZ <polygon>, got none: {svg}"
+        "{label}: expected at least one DC-HiZ <polygon>, got none"
     );
     let x_right = x + width;
     assert_polygon_eq(
@@ -2066,7 +2282,8 @@ fn assert_dc_hiz_rect(svg: &str, x: f32, width: f32, label: &str) {
 #[test]
 fn issue1_dc_hiz_start_end_rectangle() {
     let svg = render_slant10_step25("-?");
-    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-? DC-HiZ");
+    let doc = parse_svg(&svg);
+    assert_dc_hiz_rect(&doc, CHART_ORIGIN_X, CHART_STEP, "-? DC-HiZ");
 }
 
 #[test]
@@ -2074,8 +2291,9 @@ fn issue1_dc_hiz_dash_question_dash_one_cell_rectangle() {
     // `-?-` is treated as DC-HiZ with cell-grid extending across both `-`
     // characters (2 cells). The polygon spans 2*step = 50 px wide.
     let svg = render_slant10_step25("-?-");
+    let doc = parse_svg(&svg);
     assert_dc_hiz_rect(
-        &svg,
+        &doc,
         CHART_ORIGIN_X,
         2.0 * CHART_STEP,
         "-?- DC-HiZ 2-cell rectangle",
@@ -2086,103 +2304,118 @@ fn issue1_dc_hiz_dash_question_dash_one_cell_rectangle() {
 fn issue1_dc_hiz_start_neg_half_to_low_rectangle() {
     // `-?_` → DC-HiZ(1), Neg-half (HiZ→Low), Low(1).
     let svg = render_slant10_step25("-?_");
-    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-?_ DC-HiZ rect");
+    let doc = parse_svg(&svg);
+    assert_dc_hiz_rect(&doc, CHART_ORIGIN_X, CHART_STEP, "-?_ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_start_pos_half_to_high_rectangle() {
     let svg = render_slant10_step25("-?~");
-    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-?~ DC-HiZ rect");
+    let doc = parse_svg(&svg);
+    assert_dc_hiz_rect(&doc, CHART_ORIGIN_X, CHART_STEP, "-?~ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_start_busopen_from_hiz_rectangle() {
     let svg = render_slant10_step25("-?=");
-    assert_dc_hiz_rect(&svg, CHART_ORIGIN_X, CHART_STEP, "-?= DC-HiZ rect");
+    let doc = parse_svg(&svg);
+    assert_dc_hiz_rect(&doc, CHART_ORIGIN_X, CHART_STEP, "-?= DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_pos_half_from_low_end_rectangle() {
     let svg = render_slant10_step25("_-?");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-? DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "_-? DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_pos_half_from_low_neg_half_to_low_rectangle() {
     let svg = render_slant10_step25("_-?_");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-?_ DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "_-?_ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_pos_half_from_low_pos_half_to_high_rectangle() {
     let svg = render_slant10_step25("_-?~");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-?~ DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "_-?~ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_pos_half_from_low_busopen_from_hiz_rectangle() {
     let svg = render_slant10_step25("_-?=");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "_-?= DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "_-?= DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_neg_half_from_high_end_rectangle() {
     let svg = render_slant10_step25("~-?");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-? DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "~-? DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_neg_half_from_high_neg_half_to_low_rectangle() {
     let svg = render_slant10_step25("~-?_");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-?_ DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "~-?_ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_neg_half_from_high_pos_half_to_high_rectangle() {
     let svg = render_slant10_step25("~-?~");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-?~ DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "~-?~ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_neg_half_from_high_busopen_from_hiz_rectangle() {
     let svg = render_slant10_step25("~-?=");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "~-?= DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "~-?= DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_busclose_to_hiz_end_rectangle() {
     let svg = render_slant10_step25("=-?");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-? DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "=-? DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_busclose_to_hiz_neg_half_to_low_rectangle() {
     let svg = render_slant10_step25("=-?_");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-?_ DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "=-?_ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_busclose_to_hiz_pos_half_to_high_rectangle() {
     let svg = render_slant10_step25("=-?~");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-?~ DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "=-?~ DC-HiZ rect");
 }
 
 #[test]
 fn issue1_dc_hiz_busclose_to_hiz_busopen_from_hiz_rectangle() {
     let svg = render_slant10_step25("=-?=");
+    let doc = parse_svg(&svg);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
-    assert_dc_hiz_rect(&svg, x_a, CHART_STEP, "=-?= DC-HiZ rect");
+    assert_dc_hiz_rect(&doc, x_a, CHART_STEP, "=-?= DC-HiZ rect");
 }
 
 // ---- DC-Bus補完 (single-side ` =? ` / `?= `, BusCross variants) ----
@@ -2191,7 +2424,8 @@ fn issue1_dc_hiz_busclose_to_hiz_busopen_from_hiz_rectangle() {
 fn issue1_dc_bus_start_end_single_cell_rectangle() {
     // `=?` → DC-Bus(1). No adjacent transition.
     let svg = render_slant10_step25("=?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     assert_polygon_eq(
@@ -2211,7 +2445,8 @@ fn issue1_dc_bus_low_left_busopen_polygon() {
     // `_=?` → Low(1), BusOpen-from-Low, DC-Bus(1).
     // Polygon: (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l).
     let svg = render_slant10_step25("_=?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2231,7 +2466,8 @@ fn issue1_dc_bus_low_left_busopen_polygon() {
 fn issue1_dc_bus_high_left_busopen_polygon() {
     // `~=?` → High(1), BusOpen-from-High, DC-Bus(1).
     let svg = render_slant10_step25("~=?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2251,7 +2487,8 @@ fn issue1_dc_bus_high_left_busopen_polygon() {
 fn issue1_dc_bus_hiz_left_busopen_wedge_pentagon() {
     // `-=?` → HiZ(1), BusOpen-from-HiZ, DC-Bus(1).
     let svg = render_slant10_step25("-=?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2272,7 +2509,8 @@ fn issue1_dc_bus_hiz_left_busopen_wedge_pentagon() {
 fn issue1_dc_bus_busclose_to_low_right_polygon() {
     // `=?_` → DC-Bus(1), BusClose-to-Low, Low(1).
     let svg = render_slant10_step25("=?_");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2291,7 +2529,8 @@ fn issue1_dc_bus_busclose_to_low_right_polygon() {
 #[test]
 fn issue1_dc_bus_busclose_to_high_right_polygon() {
     let svg = render_slant10_step25("=?~");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2310,7 +2549,8 @@ fn issue1_dc_bus_busclose_to_high_right_polygon() {
 #[test]
 fn issue1_dc_bus_busclose_to_hiz_right_wedge_pentagon() {
     let svg = render_slant10_step25("=?-");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2331,7 +2571,8 @@ fn issue1_dc_bus_busclose_to_hiz_right_wedge_pentagon() {
 fn issue1_dc_bus_buscross_left_wedge_pentagon() {
     // `=X?` → Bus(1), BusCross, DC-Bus(1).
     let svg = render_slant10_step25("=X?");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X + CHART_STEP;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2354,7 +2595,8 @@ fn issue1_dc_bus_buscross_right_wedge_pentagon() {
     // initial `X` produces a Bus(1) body at signal start, `?` absorbs it into
     // DC-Bus, then `X=` creates the BusCross on the right.
     let svg = render_slant10_step25("X?X=");
-    let polygons = extract_all_dontcares_polygons(&svg);
+    let doc = parse_svg(&svg);
+    let polygons = extract_all_dontcares_polygons(&doc);
     let x_a = CHART_ORIGIN_X;
     let x_b = x_a + CHART_STEP;
     let s = CHART_SLANT;
@@ -2379,7 +2621,8 @@ fn issue1_singleedge_slant_preserved_with_dontcare_in_row() {
     // Grid: DC-Low [25, 75], slant [75, 85], High [85, 100], slant [100, 110], Low [110, 125].
     // The Pos slant after DC-Low must span 10 px (slant=10), NOT 0 px.
     let svg = render_slant10_step25("_?_~_");
-    let polylines = extract_all_waveform_polylines(&svg);
+    let doc = parse_svg(&svg);
+    let polylines = extract_all_waveform_polylines(&doc);
     let mut has_slant_after_dc = false;
     let mut has_slant_before_end = false;
     for points_string in &polylines {
@@ -2423,14 +2666,15 @@ fn issue1_busopen_busclose_slant_preserved_with_dontcare() {
     // BusOpen top rail: (100, y_l) -> (110, y_h) — slant=10 maintained.
     // BusClose top rail: (175, y_h) -> (185, y_l) — slant=10 maintained.
     let svg = render_slant10_step25("_?__===_?_");
+    let doc = parse_svg(&svg);
     assert_polyline_contains_segment(
-        &svg,
+        &doc,
         (100.0, CHART_Y_LOW),
         (110.0, CHART_Y_HIGH),
         "BusOpen top rail (Low side)",
     );
     assert_polyline_contains_segment(
-        &svg,
+        &doc,
         (175.0, CHART_Y_HIGH),
         (185.0, CHART_Y_LOW),
         "BusClose top rail (Low side)",
@@ -2445,14 +2689,15 @@ fn issue1_bug_bus2_pattern_busopen_and_busclose_with_dc_high() {
     // Bug-symptom check: BusOpen bottom rail must slant from (125, y_h) -> (135, y_l).
     //                    BusClose bottom rail must slant from (200, y_l) -> (210, y_h).
     let svg = render_slant10_step25("~~?~~===~?~");
+    let doc = parse_svg(&svg);
     assert_polyline_contains_segment(
-        &svg,
+        &doc,
         (125.0, CHART_Y_HIGH),
         (135.0, CHART_Y_LOW),
         "BusOpen bottom rail (High side) — slant 10 maintained",
     );
     assert_polyline_contains_segment(
-        &svg,
+        &doc,
         (200.0, CHART_Y_LOW),
         (210.0, CHART_Y_HIGH),
         "BusClose bottom rail (High side) — slant 10 maintained",
@@ -2472,35 +2717,26 @@ fn issue1_bug_bus2_pattern_busopen_and_busclose_with_dc_high() {
 // ============================================================================
 
 /// Split waveform polylines into (solid, dashed) based on the presence of
-/// `stroke-dasharray=` on each `<polyline>` element. Returns the points
+/// `stroke-dasharray` on each `<polyline>` element. Returns the points
 /// strings for each polyline in document order, separated by style.
-fn extract_polylines_by_style(svg: &str) -> (Vec<String>, Vec<String>) {
-    let layer = extract_layer(svg, "waveforms");
+fn extract_polylines_by_style(doc: &Document<'_>) -> (Vec<String>, Vec<String>) {
     let mut solid = Vec::new();
     let mut dashed = Vec::new();
-    let mut rest = layer;
-    while let Some(open) = rest.find("<polyline") {
-        let after_polyline = &rest[open..];
-        let Some(end_offset) = after_polyline.find("/>") else {
-            break;
-        };
-        let tag = &after_polyline[..end_offset + 2];
-        let Some(points_start) = tag.find("points=\"") else {
-            rest = &after_polyline[end_offset + 2..];
+    let Some(layer) = find_layer_node(doc, "waveforms") else {
+        return (solid, dashed);
+    };
+    for node in layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("polyline"))
+    {
+        let Some(points) = node.attribute("points") else {
             continue;
         };
-        let after_points = &tag[points_start + "points=\"".len()..];
-        let Some(points_close) = after_points.find('"') else {
-            rest = &after_polyline[end_offset + 2..];
-            continue;
-        };
-        let points = after_points[..points_close].to_owned();
-        if tag.contains("stroke-dasharray") {
-            dashed.push(points);
+        if node.attribute("stroke-dasharray").is_some() {
+            dashed.push(points.to_owned());
         } else {
-            solid.push(points);
+            solid.push(points.to_owned());
         }
-        rest = &after_polyline[end_offset + 2..];
     }
     (solid, dashed)
 }
@@ -2510,12 +2746,12 @@ fn extract_polylines_by_style(svg: &str) -> (Vec<String>, Vec<String>) {
 /// allowed (transitions are accumulated into the dashed polyline; solid
 /// polylines may only touch the boundary on their final point).
 fn assert_no_solid_vertex_inside_hiz(
-    svg: &str,
+    doc: &Document<'_>,
     x_left_exclusive: f32,
     x_right_exclusive: f32,
     label: &str,
 ) {
-    let (solid_polylines, _) = extract_polylines_by_style(svg);
+    let (solid_polylines, _) = extract_polylines_by_style(doc);
     for points_string in &solid_polylines {
         for (x, _y) in parse_polygon_points(points_string) {
             assert!(
@@ -2530,12 +2766,12 @@ fn assert_no_solid_vertex_inside_hiz(
 /// Assert that a dashed (`stroke-dasharray`) polyline contains the given
 /// consecutive segment.
 fn assert_dashed_polyline_contains_segment(
-    svg: &str,
+    doc: &Document<'_>,
     from: (f32, f32),
     to: (f32, f32),
     label: &str,
 ) {
-    let (_, dashed_polylines) = extract_polylines_by_style(svg);
+    let (_, dashed_polylines) = extract_polylines_by_style(doc);
     let (from_x, from_y) = from;
     let (to_x, to_y) = to;
     for points_string in &dashed_polylines {
@@ -2562,12 +2798,12 @@ fn assert_dashed_polyline_contains_segment(
 /// Assert that a solid (non-dashed) polyline contains the given consecutive
 /// segment.
 fn assert_solid_polyline_contains_segment(
-    svg: &str,
+    doc: &Document<'_>,
     from: (f32, f32),
     to: (f32, f32),
     label: &str,
 ) {
-    let (solid_polylines, _) = extract_polylines_by_style(svg);
+    let (solid_polylines, _) = extract_polylines_by_style(doc);
     let (from_x, from_y) = from;
     let (to_x, to_y) = to;
     for points_string in &solid_polylines {
@@ -2603,7 +2839,8 @@ fn issue2_high_hiz_low_solid_polylines_do_not_tunnel() {
     //   Low(3, preceded)[185,250]   width=3*25-10=65
     // x_b1=75 (~~ end / first slant start), x_b2=175 (HiZ end / second slant start).
     let svg = render_slant10_step25("~~----___");
-    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    let doc = parse_svg(&svg);
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&doc);
     assert_eq!(
         solid_polylines.len(),
         2,
@@ -2617,43 +2854,44 @@ fn issue2_high_hiz_low_solid_polylines_do_not_tunnel() {
         dashed_polylines.len(),
     );
     assert_solid_polyline_contains_segment(
-        &svg,
+        &doc,
         (25.0, CHART_Y_HIGH),
         (75.0, CHART_Y_HIGH),
         "solid ~~ run",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (75.0, CHART_Y_HIGH),
         (85.0, CHART_Y_MID),
         "dashed entry slant ~-",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (85.0, CHART_Y_MID),
         (175.0, CHART_Y_MID),
         "dashed HiZ hold",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (175.0, CHART_Y_MID),
         (185.0, CHART_Y_LOW),
         "dashed exit slant -_",
     );
     assert_solid_polyline_contains_segment(
-        &svg,
+        &doc,
         (185.0, CHART_Y_LOW),
         (250.0, CHART_Y_LOW),
         "solid ___ run",
     );
-    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 185.0, "~~----___");
+    assert_no_solid_vertex_inside_hiz(&doc, 75.0, 185.0, "~~----___");
 }
 
 #[test]
 fn issue2_low_hiz_high_symmetric_no_tunnel() {
     // `__----~~~` (mirror of ~~----___). Same layout, levels swapped.
     let svg = render_slant10_step25("__----~~~");
-    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    let doc = parse_svg(&svg);
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&doc);
     assert_eq!(
         solid_polylines.len(),
         2,
@@ -2665,30 +2903,30 @@ fn issue2_low_hiz_high_symmetric_no_tunnel() {
         "expected 1 dashed polyline: {dashed_polylines:?}"
     );
     assert_solid_polyline_contains_segment(
-        &svg,
+        &doc,
         (25.0, CHART_Y_LOW),
         (75.0, CHART_Y_LOW),
         "solid __ run",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (75.0, CHART_Y_LOW),
         (85.0, CHART_Y_MID),
         "dashed entry slant _-",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (175.0, CHART_Y_MID),
         (185.0, CHART_Y_HIGH),
         "dashed exit slant -~",
     );
     assert_solid_polyline_contains_segment(
-        &svg,
+        &doc,
         (185.0, CHART_Y_HIGH),
         (250.0, CHART_Y_HIGH),
         "solid ~~~ run",
     );
-    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 185.0, "__----~~~");
+    assert_no_solid_vertex_inside_hiz(&doc, 75.0, 185.0, "__----~~~");
 }
 
 #[test]
@@ -2703,7 +2941,8 @@ fn issue2_hiz_high_to_high_v_shape() {
     //   High(2,preceded)[135,175]
     // V shape: y_h → y_mid → y_h.
     let svg = render_slant10_step25("~~--~~");
-    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    let doc = parse_svg(&svg);
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&doc);
     assert_eq!(
         solid_polylines.len(),
         2,
@@ -2715,25 +2954,26 @@ fn issue2_hiz_high_to_high_v_shape() {
         "expected 1 dashed V-shape polyline: {dashed_polylines:?}"
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (75.0, CHART_Y_HIGH),
         (85.0, CHART_Y_MID),
         "V-shape entry slant",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (125.0, CHART_Y_MID),
         (135.0, CHART_Y_HIGH),
         "V-shape exit slant",
     );
-    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "~~--~~");
+    assert_no_solid_vertex_inside_hiz(&doc, 75.0, 135.0, "~~--~~");
 }
 
 #[test]
 fn issue2_hiz_low_to_low_u_shape() {
     // `__--__`: same layout as ~~--~~ with Low/HiZ/Low.
     let svg = render_slant10_step25("__--__");
-    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    let doc = parse_svg(&svg);
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&doc);
     assert_eq!(
         solid_polylines.len(),
         2,
@@ -2745,18 +2985,18 @@ fn issue2_hiz_low_to_low_u_shape() {
         "expected 1 dashed U-shape polyline: {dashed_polylines:?}"
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (75.0, CHART_Y_LOW),
         (85.0, CHART_Y_MID),
         "U-shape entry slant",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (125.0, CHART_Y_MID),
         (135.0, CHART_Y_LOW),
         "U-shape exit slant",
     );
-    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "__--__");
+    assert_no_solid_vertex_inside_hiz(&doc, 75.0, 135.0, "__--__");
 }
 
 #[test]
@@ -2774,7 +3014,8 @@ fn issue2_double_hiz_band_three_solids_two_dashed() {
     //   slant           [225,235]
     //   High(2,preceded)[235,275]
     let svg = render_slant10_step25("~~--__--~~");
-    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    let doc = parse_svg(&svg);
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&doc);
     assert_eq!(
         solid_polylines.len(),
         3,
@@ -2789,39 +3030,39 @@ fn issue2_double_hiz_band_three_solids_two_dashed() {
     );
     // First dashed band (high → low through HiZ).
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (75.0, CHART_Y_HIGH),
         (85.0, CHART_Y_MID),
         "first HiZ band entry",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (125.0, CHART_Y_MID),
         (135.0, CHART_Y_LOW),
         "first HiZ band exit",
     );
     // Second dashed band (low → high through HiZ).
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (175.0, CHART_Y_LOW),
         (185.0, CHART_Y_MID),
         "second HiZ band entry",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (225.0, CHART_Y_MID),
         (235.0, CHART_Y_HIGH),
         "second HiZ band exit",
     );
     // Solid middle Low run.
     assert_solid_polyline_contains_segment(
-        &svg,
+        &doc,
         (135.0, CHART_Y_LOW),
         (175.0, CHART_Y_LOW),
         "middle solid __ run",
     );
-    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 135.0, "~~--__--~~ band 1");
-    assert_no_solid_vertex_inside_hiz(&svg, 175.0, 235.0, "~~--__--~~ band 2");
+    assert_no_solid_vertex_inside_hiz(&doc, 75.0, 135.0, "~~--__--~~ band 1");
+    assert_no_solid_vertex_inside_hiz(&doc, 175.0, 235.0, "~~--__--~~ band 2");
 }
 
 #[test]
@@ -2831,7 +3072,8 @@ fn issue2_one_cell_hiz_still_splits_solid_polylines() {
     // Layout: High(2) [25, 75]; slant [75, 85]; HiZ(1, preceded) [85, 100];
     //   slant [100, 110]; Low(3, preceded) [110, 175].
     let svg = render_slant10_step25("~~-___");
-    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&svg);
+    let doc = parse_svg(&svg);
+    let (solid_polylines, dashed_polylines) = extract_polylines_by_style(&doc);
     assert_eq!(
         solid_polylines.len(),
         2,
@@ -2843,22 +3085,22 @@ fn issue2_one_cell_hiz_still_splits_solid_polylines() {
         "1-cell HiZ band must be one dashed polyline: {dashed_polylines:?}"
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (75.0, CHART_Y_HIGH),
         (85.0, CHART_Y_MID),
         "1-cell HiZ entry slant",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (85.0, CHART_Y_MID),
         (100.0, CHART_Y_MID),
         "1-cell HiZ hold (step-slant=15)",
     );
     assert_dashed_polyline_contains_segment(
-        &svg,
+        &doc,
         (100.0, CHART_Y_MID),
         (110.0, CHART_Y_LOW),
         "1-cell HiZ exit slant",
     );
-    assert_no_solid_vertex_inside_hiz(&svg, 75.0, 110.0, "~~-___");
+    assert_no_solid_vertex_inside_hiz(&doc, 75.0, 110.0, "~~-___");
 }
