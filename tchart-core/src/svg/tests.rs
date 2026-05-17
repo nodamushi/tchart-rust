@@ -280,7 +280,11 @@ fn bus_cross_swaps_rails() {
 }
 
 #[test]
-fn dontcare_emits_rect_in_dontcares_layer() {
+fn dontcare_emits_polygon_in_dontcares_layer() {
+    // Per the updated DontCare polygon spec (issue #1 / svg-rendering.md
+    // §「`LevelRun(DontCareAlong*)`」), every DC variant emits a `<polygon>`
+    // in the dontcares layer — rectangular DC variants are now 4-vertex
+    // polygons rather than `<rect>` elements.
     let style = ChartStyle::default();
     let elements = vec![
         level(SignalLevel::Low, 1),
@@ -291,7 +295,7 @@ fn dontcare_emits_rect_in_dontcares_layer() {
     let svg = render(&make_doc(vec![line]), &TestFonts);
     let start = svg.find("class=\"dontcares\"").expect("dontcares");
     let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("<rect"));
+    assert!(svg[start..end].contains("<polygon"));
 }
 
 /// DontCare の `<rect>` のデフォルト fill は `url(#dontcare-hatch-1)` を参照する。
@@ -1221,9 +1225,10 @@ fn dontcare_along_bus_left_vertical_right_cross_pentagon() {
     );
 }
 
-/// DontCareAlongLow still emits `<rect>` (not affected by bus polygon change).
+/// DontCareAlongLow emits `<polygon>` (issue #1: every DC variant now uses
+/// `<polygon>`, including the rectangular cases that used to emit `<rect>`).
 #[test]
-fn dontcare_along_low_still_emits_rect() {
+fn dontcare_along_low_emits_polygon() {
     let style = ChartStyle::default();
     let elements = vec![
         level(SignalLevel::Low, 1),
@@ -1234,12 +1239,12 @@ fn dontcare_along_low_still_emits_rect() {
     let svg = render(&make_doc(vec![line]), &TestFonts);
     let layer = extract_dontcares_layer(&svg);
     assert!(
-        layer.contains("<rect"),
-        "DontCareAlongLow must still emit <rect>: {layer}"
+        layer.contains("<polygon"),
+        "DontCareAlongLow must emit <polygon>: {layer}"
     );
     assert!(
-        !layer.contains("<polygon"),
-        "DontCareAlongLow must not emit <polygon>: {layer}"
+        !layer.contains("<rect"),
+        "DontCareAlongLow must not emit <rect>: {layer}"
     );
 }
 
