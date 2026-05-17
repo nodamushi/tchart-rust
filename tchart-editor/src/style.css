@@ -74,7 +74,8 @@ body {
   color: #6b7280;
 }
 
-.toolbar button {
+.toolbar button,
+.toolbar a.toolbar-action {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -86,9 +87,13 @@ body {
   color: #2c3138;
   font-size: 12px;
   line-height: 1.2;
+  text-decoration: none;
+  white-space: nowrap;
 }
 
-.toolbar button:hover:not(:disabled) {
+.toolbar button:hover:not(:disabled),
+.toolbar a.toolbar-action:hover,
+.toolbar a.toolbar-action:focus-visible {
   background: linear-gradient(180deg, #ffffff 0%, #dde2ea 100%);
 }
 
@@ -97,12 +102,14 @@ body {
   cursor: not-allowed;
 }
 
-.toolbar button svg {
+.toolbar button svg,
+.toolbar a.toolbar-action svg {
   flex: 0 0 auto;
   display: inline-block;
 }
 
-.toolbar button .btn-label {
+.toolbar button .btn-label,
+.toolbar a.toolbar-action .btn-label {
   white-space: nowrap;
 }
 
