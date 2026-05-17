@@ -218,8 +218,17 @@ SVG 出力 (1 本ぶん):
 
 - `accum.push(point)`: 点を追加。
 - `accum.flush()`: 現在の蓄積を `<polyline>` として出力し、蓄積をクリア。
-- Bus は **上下 2 本の蓄積器** (top rail / bottom rail) を並行して持つ。
-- DontCare 矩形 (`?`) や Gap (`:`) など「断絶」が来たら必ず `flush()` する。
+- 蓄積器は **スタイルごとに別** に存在する:
+  - 実線蓄積器 (Low / High および Low/High 間の SingleEdge 用)
+  - HiZ 蓄積器 (破線、HiZ LevelRun および HiZ が関与する SingleEdge 用)
+  - Bus 上下 2 本の蓄積器 (top rail / bottom rail、Bus 系 LevelRun および BusOpen / BusClose / BusCross 用)
+- 次の場合は必ず `flush()` する (断絶):
+  - **HiZ (`-`) 区間に入る / 出る境界** — HiZ は破線スタイルで実線 polyline と統合できない。
+    - **SingleEdge** (`~-`, `_-`, `-~`, `-_`): slant 線は **HiZ 蓄積器** (破線) に書き出される。実線蓄積器は SingleEdge 進入前に flush され、退出後 (HiZ → Low/High) は slant 終点 (x+s, y_l or y_h) から実線蓄積器が再開する。
+    - **Bus 系の半 slant** (BusOpen-from-HiZ `-=`、BusClose-to-HiZ `=-`): 半 slant rails は **Bus 蓄積器** (実線) に書き出される (top rail / bottom rail それぞれ)。HiZ 蓄積器は遷移開始 / 終了の点 (x, y_mid) または (x+s, y_mid) で flush される。
+  - **DontCare 領域 (`?`)** が来たとき (内部水平線は別途連結ルールあり、§`LevelRun(DontCareAlong*)` 参照)。
+  - **Gap (`:`)** が来たとき (全蓄積器を flush)。
+- これにより `~~----___` のような波形で実線 polyline が HiZ 区間を「貫通」する余計な斜め直線が出ない (`#2`)。HiZ 区間は `~-` slant + `----` hold + `-_` slant がすべて HiZ (破線) の 1 本の polyline として描画され、両側の `~~` / `___` は独立した実線 polyline になる。
 
 ### 要素ごとの描画契約
 
@@ -289,8 +298,10 @@ DC-HiZ は **常に矩形** (4 点、`(x_a, y_h)`, `(x_b, y_h)`, `(x_b, y_l)`, `
 例: `_~`, `~_`, `~-`, `-_`, `_-`, `-~`
 
 - 線本数: **1**
-- 蓄積器: 1 つ (Single 用)
-- 描画: `(x, y_from)` → `(x + slant, y_to)` を蓄積器に push。
+- 蓄積器: 1 つ。**どちらの蓄積器** に書くかは遷移端点の HiZ 関与で決める:
+  - `_~` / `~_` (Low ↔ High、HiZ 非関与): **実線蓄積器** に push。
+  - `~-` / `-~` / `_-` / `-_` (HiZ が `from` または `to`): **HiZ 蓄積器** に push。HiZ 側の polyline が破線スタイルで slant を取り込むことで、実線 polyline が HiZ 区間を貫通する余計な線 (`#2`) を防ぐ。
+- 描画: `(x, y_from)` → `(x + slant, y_to)` を該当蓄積器に push。
 - `from` の y は `from.into_shape()` から: Low → y_low, High → y_high, HiZ → y_mid。`to` も同様。
 
 ##### `BusOpen` — Single → Double
