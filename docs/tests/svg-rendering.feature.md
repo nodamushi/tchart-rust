@@ -114,20 +114,20 @@
 ## DontCare 描画 (`?`)
 
 ## @not-implemented @smoke
-### Scenario: DontCareAlongLow は矩形 + y_low に内部水平線
-- Given LevelRun(DontCareAlongLow, 2)
-- Then `dontcares` レイヤに `<rect>` (signal_box 全高)
+### Scenario: DontCareAlongLow (両端 signal start/end) は矩形 polygon + y_low に内部水平線
+- Given LevelRun(DontCareAlongLow, 2)、信号行頭〜行末で隣接遷移なし
+- Then `dontcares` レイヤに `<polygon>` 4 頂点 (y_h〜y_l 範囲の矩形): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
 - And `waveforms` レイヤに y=y_low の polyline 区間が含まれる
 
 ## @not-implemented
-### Scenario: DontCareAlongHigh は y_high に内部水平線
-- Given LevelRun(DontCareAlongHigh, 2)
-- Then `<rect>` + y=y_high 水平線
+### Scenario: DontCareAlongHigh (両端 signal start/end) は矩形 polygon + y_high 内部水平線
+- Given LevelRun(DontCareAlongHigh, 2)、信号行頭〜行末で隣接遷移なし
+- Then `<polygon>` 4 頂点 (y_h〜y_l 範囲の矩形) + y=y_high 水平線
 
 ## @not-implemented
-### Scenario: DontCareAlongHiZ は y_mid に破線
-- Given LevelRun(DontCareAlongHiZ, 2)
-- Then `<rect>` + y=y_mid の破線 polyline
+### Scenario: DontCareAlongHiZ (両端 signal start/end) は矩形 polygon + y_mid 破線
+- Given LevelRun(DontCareAlongHiZ, 2)、信号行頭〜行末で隣接遷移なし
+- Then `<polygon>` 4 頂点 (y_h〜y_l 範囲の矩形) + y=y_mid の破線 polyline
 
 ### Scenario: DontCareAlongBus (両側 Bus continue) は矩形塗り
 - Given `==?==` (前後とも Bus continue)、slant=2
@@ -177,16 +177,397 @@
 - Given 前要素 5 種 (Bus continue / Low / High / HiZ / X cross) × 後要素 5 種の組合せの `?` 領域
 - Then 各組合せで左右辺が境界に正しく追従し、塗りが `signal_box` 全高にはみ出さない
 
+## #1: `?` (DontCare) の塗り polygon と隣接 slant の完全網羅 (GitHub issue #1)
+
+DC-X (X ∈ {Low, High, HiZ, Bus}) の塗り polygon は **左右各境界の遷移種別** が決める。
+
+座標規約:
+- `x_a` = DC 区間の左端 x、`x_b` = DC 区間の右端 x (= `x_a + W * step`、`W` = DC 区間のセル数)
+- `s` = `@slant`、`step` = `@step`、`y_h` / `y_mid` / `y_l` は signal_box の上 / 中 / 下端
+
+共通ルール:
+- DC-X 内部水平線: DC-Low は y_l、DC-High は y_h、DC-HiZ は y_mid (破線)、DC-Bus は y_h と y_l の 2 本。
+- 信号 polyline の遷移 slant は `?` の有無に関わらず `@slant` どおりに描画される (垂直 / slant=0 に縮退してはならない)。
+- polygon の左右辺は **隣接遷移の斜辺に追従** する。境界が垂直 (signal start/end / 同レベル拡張) のときは矩形の垂直辺。
+- 半 slant (HiZ 隣接、y_mid を経由する遷移) では polygon に **y_mid 中継頂点** が 1 個加わり、頂点数が 5 になる。両側半 slant なら 6 頂点。
+- y_mid 中継頂点の x 位置は **slant が y_mid と交わる x**。Pos-half (y_l→y_mid) では slant_end_x、Neg-half going down to y_l (y_mid→y_l) では slant_start_x、Neg-half going down from y_h to y_mid (y_h→y_mid) では slant_end_x、Pos-half going up from y_mid to y_h (y_mid→y_h) では slant_start_x。
+- BusOpen-from-HiZ / BusClose-to-HiZ は両 rail が半 slant で y_mid から発散/収束 → polygon に 1 個の y_mid wedge 頂点 (5 頂点)。
+- BusOpen / BusClose で single 側が Low/High の場合、polygon は **斜辺 rail のみ** (Low なら top rail、High なら bottom rail) に追従、もう一方の rail (水平) は polygon の上下辺に吸収される (4 頂点扱い)。
+
+### DC-Low (内部水平線 y_l) × 16 組
+
+## @not-implemented
+### Scenario: `_?` DC-Low (start | end) は矩形 (#1)
+- Given `_?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部水平線 (x_a, y_l) → (x_b, y_l)
+
+## @not-implemented
+### Scenario: `_?~` DC-Low (start | Pos) は右上に台形拡張 (#1)
+- Given `_?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部水平線 (x_a, y_l) → (x_b, y_l)、Pos slant (x_b, y_l) → (x_b+s, y_h)、High hold (x_b+s, y_h) → (x_b+step, y_h)
+
+## @not-implemented
+### Scenario: `_?-` DC-Low (start | Pos-half to HiZ) は右に y_mid 中継の五頂点 (#1)
+- Given `_?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部水平線 (x_a, y_l) → (x_b, y_l)、Pos-half slant (x_b, y_l) → (x_b+s, y_mid)、HiZ 破線 (x_b+s, y_mid) → (x_b+step, y_mid)
+
+## @not-implemented
+### Scenario: `_?=` DC-Low (start | BusOpen-from-Low) は右上に台形拡張 (#1)
+- Given `_?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a, y_l)
+- And BusOpen-from-Low: top rail (x_b, y_l) → (x_b+s, y_h) 斜辺、bottom rail (x_b, y_l) → (x_b+s, y_l) 水平
+- And polygon 右辺は BusOpen top rail に追従
+
+## @not-implemented
+### Scenario: `~_?` DC-Low (Neg | end) は左上から斜辺で降りる台形 (#1)
+- Given `~_?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l)
+- And 信号 polyline: High hold (... → x_a, y_h)、Neg slant (x_a, y_h) → (x_a+s, y_l)、内部水平線 (x_a+s, y_l) → (x_b, y_l)
+
+## @not-implemented
+### Scenario: `~_?~` DC-Low (Neg | Pos) は左右斜辺の平行四辺形 (#1)
+- Given `~_?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a+s, y_l)
+- And 左 Neg slant (x_a, y_h) → (x_a+s, y_l)、右 Pos slant (x_b, y_l) → (x_b+s, y_h)
+
+## @not-implemented
+### Scenario: `~_?-` DC-Low (Neg | Pos-half) は左斜辺 + 右 y_mid タブの五頂点 (#1)
+- Given `~_?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a+s, y_l)
+- And 左 Neg slant、右 Pos-half (x_b, y_l) → (x_b+s, y_mid)
+
+## @not-implemented
+### Scenario: `~_?=` DC-Low (Neg | BusOpen-from-Low) は左右斜辺の平行四辺形 (#1)
+- Given `~_?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a+s, y_l)
+
+## @not-implemented
+### Scenario: `-_?` DC-Low (Neg-half | end) は左 y_mid 起点の五頂点 (#1)
+- Given `-_?`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid)
+- And Neg-half slant (HiZ→Low): (x_a, y_mid) → (x_a+s, y_l)、y_mid 中継頂点は (x_a, y_mid) (= slant_start_x)
+
+## @not-implemented
+### Scenario: `-_?~` DC-Low (Neg-half | Pos) は左 y_mid + 右斜辺の五頂点 (#1)
+- Given `-_?~`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `-_?-` DC-Low (Neg-half | Pos-half) は両側 y_mid タブの六頂点 (#1)
+- Given `-_?-`、@slant 10 @step 25
+- Then dontcares polygon 6 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `-_?=` DC-Low (Neg-half | BusOpen-from-Low) は左 y_mid + 右斜辺の五頂点 (#1)
+- Given `-_?=`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `=_?` DC-Low (BusClose-to-Low | end) は左上斜辺の台形 (#1)
+- Given `=_?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l)
+- And BusClose-to-Low: top rail (x_a, y_h) → (x_a+s, y_l) 斜辺、bottom rail (x_a, y_l) → (x_a+s, y_l) 水平
+- And polygon 左辺は BusClose top rail に追従
+
+## @not-implemented
+### Scenario: `=_?~` DC-Low (BusClose | Pos) は左右斜辺の平行四辺形 (#1)
+- Given `=_?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a+s, y_l)
+
+## @not-implemented
+### Scenario: `=_?-` DC-Low (BusClose | Pos-half) は左斜辺 + 右 y_mid タブの五頂点 (#1)
+- Given `=_?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a+s, y_l)
+
+## @not-implemented
+### Scenario: `=_?=` DC-Low (BusClose | BusOpen) は左右両 top rail 斜辺の平行四辺形 (#1)
+- Given `=_?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a+s, y_l)
+
+### DC-High (内部水平線 y_h、DC-Low と上下対称) × 16 組
+
+## @not-implemented
+### Scenario: `~?` DC-High (start | end) は矩形 (#1)
+- Given `~?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部水平線 (x_a, y_h) → (x_b, y_h)
+
+## @not-implemented
+### Scenario: `~?_` DC-High (start | Neg) は右下に台形拡張 (#1)
+- Given `~?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+- And Neg slant (x_b, y_h) → (x_b+s, y_l)
+
+## @not-implemented
+### Scenario: `~?-` DC-High (start | Neg-half to HiZ) は右 y_mid 中継の五頂点 (#1)
+- Given `~?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l)
+- And Neg-half slant (High→HiZ): (x_b, y_h) → (x_b+s, y_mid)、y_mid 中継頂点 (x_b+s, y_mid)
+
+## @not-implemented
+### Scenario: `~?=` DC-High (start | BusOpen-from-High) は右下に台形拡張 (#1)
+- Given `~?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+- And BusOpen-from-High: top rail (x_b, y_h) → (x_b+s, y_h) 水平、bottom rail (x_b, y_h) → (x_b+s, y_l) 斜辺
+
+## @not-implemented
+### Scenario: `_~?` DC-High (Pos | end) は左下斜辺の台形 (#1)
+- Given `_~?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And Pos slant (x_a, y_l) → (x_a+s, y_h)
+
+## @not-implemented
+### Scenario: `_~?_` DC-High (Pos | Neg) は左右斜辺の平行四辺形 (#1)
+- Given `_~?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `_~?-` DC-High (Pos | Neg-half) は左斜辺 + 右 y_mid 中継の五頂点 (#1)
+- Given `_~?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `_~?=` DC-High (Pos | BusOpen-from-High) は左右斜辺の平行四辺形 (#1)
+- Given `_~?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `-~?` DC-High (Pos-half | end) は左 y_mid 中継の五頂点 (#1)
+- Given `-~?`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l), (x_a, y_mid)
+- And Pos-half slant (HiZ→High): (x_a, y_mid) → (x_a+s, y_h)、y_mid 中継頂点 (x_a, y_mid) (= slant_start_x)
+
+## @not-implemented
+### Scenario: `-~?_` DC-High (Pos-half | Neg) は左 y_mid + 右斜辺の五頂点 (#1)
+- Given `-~?_`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l), (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `-~?-` DC-High (Pos-half | Neg-half) は両側 y_mid タブの六頂点 (#1)
+- Given `-~?-`、@slant 10 @step 25
+- Then dontcares polygon 6 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l), (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `-~?=` DC-High (Pos-half | BusOpen-from-High) は左 y_mid + 右斜辺の五頂点 (#1)
+- Given `-~?=`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l), (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `=~?` DC-High (BusClose-to-High | end) は左下斜辺の台形 (#1)
+- Given `=~?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And BusClose-to-High: top rail (x_a, y_h) → (x_a+s, y_h) 水平、bottom rail (x_a, y_l) → (x_a+s, y_h) 斜辺
+- And polygon 左辺は BusClose bottom rail に追従
+
+## @not-implemented
+### Scenario: `=~?_` DC-High (BusClose | Neg) は左右斜辺の平行四辺形 (#1)
+- Given `=~?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `=~?-` DC-High (BusClose | Neg-half) は左斜辺 + 右 y_mid 中継の五頂点 (#1)
+- Given `=~?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `=~?=` DC-High (BusClose | BusOpen) は左右両 bottom rail 斜辺の平行四辺形 (#1)
+- Given `=~?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+
+### DC-HiZ (内部破線 y_mid) × 17 組 (`-?-` 含む)
+
+DC-HiZ は polygon が **常に矩形** (隣接遷移の斜辺に追従しない、`==` 1-cell と同じ範囲)。隣接遷移の slant は波形 polyline 側で別途維持される。
+
+注: `-?-` は現状 tchart で無視されているが、`-?-` は `==` と同じく 1-cell DC-HiZ 矩形として扱う (新規対応)。
+
+## @not-implemented
+### Scenario: `-?` DC-HiZ (start | end) は矩形 (#1)
+- Given `-?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部破線 (x_a, y_mid) → (x_b, y_mid)
+
+## @not-implemented
+### Scenario: `-?-` DC-HiZ (同レベル拡張、`==` 1-cell と同範囲) は矩形 (#1)
+- Given `-?-`、@slant 10 @step 25 (DC-HiZ,1 として扱う、`?` 0-width で同レベル `-` 同士を統合)
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部破線 (x_a, y_mid) → (x_b, y_mid)
+- And 範囲は同 step 数の `==` と同じ (新規対応: 現状 tchart は `-?-` を無視している)
+
+## @not-implemented
+### Scenario: `-?_` DC-HiZ (start | Neg-half to Low) は矩形 (#1)
+- Given `-?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 信号 polyline: 内部破線 (x_a, y_mid) → (x_b, y_mid)、Neg-half slant (x_b, y_mid) → (x_b+s, y_l) (slant=10 維持)
+
+## @not-implemented
+### Scenario: `-?~` DC-HiZ (start | Pos-half to High) は矩形 (#1)
+- Given `-?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And Pos-half slant (x_b, y_mid) → (x_b+s, y_h) (slant=10 維持)
+
+## @not-implemented
+### Scenario: `-?=` DC-HiZ (start | BusOpen-from-HiZ) は矩形 (#1)
+- Given `-?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And BusOpen-from-HiZ: 上 rail (x_b, y_mid) → (x_b+s, y_h)、下 rail (x_b, y_mid) → (x_b+s, y_l) (両半 slant 発散、slant=10 維持)
+
+## @not-implemented
+### Scenario: `_-?` DC-HiZ (Pos-half from Low | end) は矩形 (#1)
+- Given `_-?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And Pos-half slant (Low→HiZ): (x_a, y_l) → (x_a+s, y_mid) (slant=10 維持)
+- And 内部破線 (x_a+s, y_mid) → (x_b, y_mid) (slant 終了後の hold 部分)
+
+## @not-implemented
+### Scenario: `_-?_` DC-HiZ (Pos-half from Low | Neg-half to Low) は矩形 (#1)
+- Given `_-?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 左 Pos-half (x_a, y_l) → (x_a+s, y_mid)、右 Neg-half (x_b, y_mid) → (x_b+s, y_l) (両方 slant=10)
+
+## @not-implemented
+### Scenario: `_-?~` DC-HiZ (Pos-half from Low | Pos-half to High) は矩形 (#1)
+- Given `_-?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 左 Pos-half (x_a, y_l) → (x_a+s, y_mid)、右 Pos-half (x_b, y_mid) → (x_b+s, y_h)
+
+## @not-implemented
+### Scenario: `_-?=` DC-HiZ (Pos-half from Low | BusOpen-from-HiZ) は矩形 (#1)
+- Given `_-?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 左 Pos-half、右 BusOpen-from-HiZ 両 rail (すべて slant=10)
+
+## @not-implemented
+### Scenario: `~-?` DC-HiZ (Neg-half from High | end) は矩形 (#1)
+- Given `~-?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And Neg-half slant (High→HiZ): (x_a, y_h) → (x_a+s, y_mid) (slant=10 維持)
+
+## @not-implemented
+### Scenario: `~-?_` DC-HiZ (Neg-half from High | Neg-half to Low) は矩形 (#1)
+- Given `~-?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 左 Neg-half (x_a, y_h) → (x_a+s, y_mid)、右 Neg-half (x_b, y_mid) → (x_b+s, y_l)
+
+## @not-implemented
+### Scenario: `~-?~` DC-HiZ (Neg-half from High | Pos-half to High) は矩形 (#1)
+- Given `~-?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 左 Neg-half、右 Pos-half (両方 slant=10)
+
+## @not-implemented
+### Scenario: `~-?=` DC-HiZ (Neg-half from High | BusOpen-from-HiZ) は矩形 (#1)
+- Given `~-?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `=-?` DC-HiZ (BusClose-to-HiZ | end) は矩形 (#1)
+- Given `=-?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And BusClose-to-HiZ: 上 rail (x_a, y_h) → (x_a+s, y_mid)、下 rail (x_a, y_l) → (x_a+s, y_mid) (両半 slant 収束、slant=10 維持)
+
+## @not-implemented
+### Scenario: `=-?_` DC-HiZ (BusClose | Neg-half to Low) は矩形 (#1)
+- Given `=-?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `=-?~` DC-HiZ (BusClose | Pos-half to High) は矩形 (#1)
+- Given `=-?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+
+## @not-implemented
+### Scenario: `=-?=` DC-HiZ (BusClose | BusOpen) は矩形 (#1)
+- Given `=-?=`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 左 BusClose-to-HiZ 両 rail、右 BusOpen-from-HiZ 両 rail (すべて slant=10)
+
+### DC-Bus 既存 scenario の補完 (`=?` / `?=` 片側 single)
+
+## @not-implemented
+### Scenario: `=?` DC-Bus,1 (start | end) は矩形 (#1)
+- Given `=?` (DC-Bus,1 単独)、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And 内部水平線 y_h と y_l の 2 本
+
+## @not-implemented
+### Scenario: `_=?` (Low | BusOpen-from-Low | DC-Bus,1 | end) は左下 `/` の四頂点 (#1)
+- Given `_=?`、@slant 10 @step 25 (DC-Bus は `=?` 部分の 1 セル、x_a = BusOpen 開始 x、x_b = signal 末端)
+- Then dontcares polygon 4 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l)
+- And BusOpen-from-Low の top rail (x_a, y_l) → (x_a+s, y_h) で polygon 左辺
+
+## @not-implemented
+### Scenario: `~=?` (High | BusOpen-from-High | DC-Bus,1 | end) は左下 `\` の四頂点 (#1)
+- Given `~=?`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l)
+- And BusOpen-from-High の bottom rail (x_a, y_h) → (x_a+s, y_l) で polygon 左辺
+
+## @not-implemented
+### Scenario: `-=?` (HiZ | BusOpen-from-HiZ | DC-Bus,1 | end) は左 wedge の五頂点 (#1)
+- Given `-=?`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a+s, y_h), (x_b, y_h), (x_b, y_l), (x_a+s, y_l), (x_a, y_mid)
+- And BusOpen-from-HiZ の両 rail (x_a, y_mid) → (x_a+s, y_h) / (x_a, y_mid) → (x_a+s, y_l)、y_mid wedge 頂点 (x_a, y_mid)
+
+## @not-implemented
+### Scenario: `=?_` (start | DC-Bus,1 | BusClose-to-Low | Low) は右下 `\` の四頂点 (#1)
+- Given `=?_`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b+s, y_l), (x_a, y_l)
+- And BusClose-to-Low の top rail (x_b, y_h) → (x_b+s, y_l) で polygon 右辺
+
+## @not-implemented
+### Scenario: `=?~` (start | DC-Bus,1 | BusClose-to-High | High) は右下 `/` の四頂点 (#1)
+- Given `=?~`、@slant 10 @step 25
+- Then dontcares polygon 4 頂点 (CW): (x_a, y_h), (x_b+s, y_h), (x_b, y_l), (x_a, y_l)
+- And BusClose-to-High の bottom rail (x_b, y_l) → (x_b+s, y_h) で polygon 右辺
+
+## @not-implemented
+### Scenario: `=?-` (start | DC-Bus,1 | BusClose-to-HiZ | HiZ) は右 wedge の五頂点 (#1)
+- Given `=?-`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b+s, y_mid), (x_b, y_l), (x_a, y_l)
+- And BusClose-to-HiZ の両 rail (x_b, y_h) → (x_b+s, y_mid) / (x_b, y_l) → (x_b+s, y_mid)、y_mid wedge 頂点 (x_b+s, y_mid)
+
+## @not-implemented
+### Scenario: `=X?` (Bus | BusCross | DC-Bus,1 | end) は左 BusCross 中点の五頂点 (#1)
+- Given `=X?`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b, y_l), (x_a, y_l), (x_a + s/2, y_mid)
+- And BusCross の中点 (x_a + s/2, y_mid) が左辺の wedge
+
+## @not-implemented
+### Scenario: `?X=` (start | DC-Bus,1 | BusCross | Bus) は右 BusCross 中点の五頂点 (#1)
+- Given `?X=`、@slant 10 @step 25
+- Then dontcares polygon 5 頂点 (CW): (x_a, y_h), (x_b, y_h), (x_b + s/2, y_mid), (x_b, y_l), (x_a, y_l)
+
+### `#1` 補足: 隣接遷移 slant の保持 (回帰確認)
+
+## @not-implemented
+### Scenario: `?` を含む信号行で SingleEdge slant は維持される (#1)
+- Given `_?_~_` または `~_?_~` のような `?` を含む信号行、`@slant 10`
+- Then Pos / Neg 遷移は **slant 幅 10** で描画される (垂直 / slant=0 に縮退してはならない)
+
+## @not-implemented
+### Scenario: `?` を含む信号行で BusOpen / BusClose slant は維持される (#1)
+- Given `_?__===_?_` のような `?` と Bus を含む信号行、`@slant 10`
+- Then BusOpen / BusClose は **slant 幅 10** で描画される (垂直に縮退してはならない)
+
+## @not-implemented
+### Scenario: `~~?~~===~?~` (Bug Bus2) の BusOpen / BusClose 下 rail は両方 slant=10 で描画される (#1)
+- Given `~~?~~===~?~` (DC-High,4 + Bus,3 + DC-High,2)、`@slant 10`
+- Then BusOpen 下 rail は (x_b1, y_h) → (x_b1+10, y_l) の斜辺として独立 polyline で描画 (下 rail が宙に浮く現象なし)
+- And BusClose 下 rail は (x_b2, y_l) → (x_b2+10, y_h) の斜辺で対称に描画
+- And 上 rail は DC-High 内部線 + BusOpen 上 rail 水平 + Bus 上 rail + BusClose 上 rail 水平 + DC-High 内部線 が全幅 y_h で連結
+
 ## @not-implemented
 ### Scenario: DontCare の前後で polyline が連結される
 - Given `_?_` (Low,1 + DontCareAlongLow,1 + Low,1)
 - Then 全 3 区間が **1 本の polyline** に蓄積される (`<line>` 独立要素は使われない)
 
 ## @not-implemented
-### Scenario: DontCare 矩形のデフォルト塗りはハッチパターン参照
+### Scenario: DontCare polygon のデフォルト塗りはハッチパターン参照
 - Given `@dontcare_color` を指定しないチャート (`?` を含む)
-- Then DontCare の `<rect>` / `<polygon>` の `fill` 属性は `url(#dontcare-hatch-1)` となる
-- And `<rect>` / `<polygon>` には `fill` 以外の属性は出力されない (アウトラインなし)
+- Then DontCare の `<polygon>` の `fill` 属性は `url(#dontcare-hatch-1)` となる
+- And `<polygon>` には `fill` 以外の属性は出力されない (アウトラインなし)
 - And SVG ルート直下の `<defs>` 内に `<pattern id="dontcare-hatch-1" patternUnits="userSpaceOnUse" patternTransform="rotate(45)" ...>` が 1 つだけ出力される
 - And `<pattern>` は内部に 1 本の `<line stroke="<DEFAULT_DONTCARE_HATCH_STROKE_COLOR>" ...>` (右上がり斜線になる方向) を持つ
 
@@ -194,14 +575,14 @@
 ### Scenario: @dontcare_color でハッチ線色を上書きできる
 - Given `@dontcare_color #c00` を 1 度だけ指定したチャート (`?` を含む)
 - Then `<defs>` には `<pattern id="dontcare-hatch-1">` が 1 つだけ出力され、内部の `<line stroke="#c00"/>` が出力される
-- And DontCare の `<rect>` / `<polygon>` の `fill` 属性は `url(#dontcare-hatch-1)` となる
-- And `<rect>` / `<polygon>` には `fill` 以外の属性は付与されない
+- And DontCare の `<polygon>` の `fill` 属性は `url(#dontcare-hatch-1)` となる
+- And `<polygon>` には `fill` 以外の属性は付与されない
 
 ## @not-implemented
 ### Scenario: @dontcare_color を途中で書き換えると行ごとに色が切り替わる
 - Given チャートに行 A (`?` 含む)、行 B (`?` 含む)、行 C (`?` 含む) があり、行 A の前で `@dontcare_color #c00`、行 C の前で `@dontcare_color #06c` が指定されている
 - Then `<defs>` には `<pattern id="dontcare-hatch-1">` (`<line stroke="#c00"/>`) と `<pattern id="dontcare-hatch-2">` (`<line stroke="#06c"/>`) の 2 つが、初出順 (`#c00` → `#06c`) で出力される
-- And 行 A と行 B の `<rect>` / `<polygon>` の `fill` は `url(#dontcare-hatch-1)`、行 C の `<rect>` / `<polygon>` の `fill` は `url(#dontcare-hatch-2)`
+- And 行 A と行 B の `<polygon>` の `fill` は `url(#dontcare-hatch-1)`、行 C の `<polygon>` の `fill` は `url(#dontcare-hatch-2)`
 
 ## @not-implemented
 ### Scenario: 同じ色を再指定しても `<defs>` の `<pattern>` は重複しない
@@ -822,9 +1203,9 @@
 - Given `Sig =X?X=`
 - Then polygon は六角形 `>▲■▲<`、左右辺の頂点が X の cross 中点 `(x + slant/2, y_mid)`
 
-### Scenario: dontcare 矩形にアウトライン (stroke) なし
+### Scenario: dontcare polygon にアウトライン (stroke) なし
 - Given `Sig _?_`
-- Then 出力 `<rect>` の `stroke` 属性は付かない or `stroke="none"` (アウトライン無し)
+- Then 出力 `<polygon>` の `stroke` 属性は付かない or `stroke="none"` (アウトライン無し)
 
 ### Scenario: SVG の `<style>` に CSS インジェクション可能な値を出さない
 - Given `@font "monospace; }body{...}"` (悪意ある family 名)
@@ -860,7 +1241,7 @@
 
 ### Scenario: DontCare × アンカー × ハイライト 同居
 - Given `Sig __[?]@{a}__`
-- Then DontCare 矩形、ハイライト矩形、アンカー (描画なし) がそれぞれ独立レイヤに出力される
+- Then DontCare polygon、ハイライト矩形、アンカー (描画なし) がそれぞれ独立レイヤに出力される
 
 ### Scenario: BusCross × ハイライト × DontCare
 - Given `Sig =[X?X]=`
