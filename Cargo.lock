@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "tchart-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "fontdb",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "tchart-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "tchart-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "js-sys",
  "png 0.17.16",
