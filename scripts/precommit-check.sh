@@ -63,11 +63,11 @@ staged=$(git diff --cached --name-only 2>/dev/null || true)
 
 # ---------- Check 1: no local IDs in staged public files ----------
 # Excluded from the scan:
-# - docs/bugs.md / docs/tasks.md / docs/tasks/: authoritative homes
+# - docs/bugs.md / docs/bugs/ / docs/tasks.md / docs/tasks/: authoritative homes
 # - tmp/: gitignored anyway
 # - AGENTS.md: defines the rule itself (mentions forbidden patterns as examples)
 # - scripts/precommit-check.sh: implements the regex
-excluded_re='^(docs/bugs\.md|docs/tasks\.md|docs/tasks/|tmp/|AGENTS\.md|scripts/precommit-check\.sh)'
+excluded_re='^(docs/bugs\.md|docs/bugs/|docs/tasks\.md|docs/tasks/|tmp/|AGENTS\.md|scripts/precommit-check\.sh)'
 public_files=$(printf '%s\n' "$staged" | grep -vE "$excluded_re" || true)
 
 violations=""
@@ -149,5 +149,47 @@ if printf '%s\n' "$staged" | grep -qE "$trigger_re"; then
   fi
   rm -f "$log"
 fi
+
+# ---------- Check 6: cargo / pnpm test on develop / main ----------
+# branch-sync skill: prefix に `code` を含む commit のみ test pass を要求。
+# heredoc / -m "..." / -m='...' / --message="..." すべて対応するため、
+# 既知 prefix トークンの厳密パターンで `$command` 全体を grep する
+# (中身の引用形式に依存しない)。
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+case "$current_branch" in
+  develop|main)
+    known_re='(doc/spec|doc/test|doc/sample|doc/help|code|test|claude|version)'
+    prefix_pat="\[${known_re}(,${known_re})*([[:space:]]+#[0-9]+)*\]"
+    prefix_block=$(printf '%s' "$command" | grep -oE "$prefix_pat" | head -1 | tr -d '[]')
+
+    need_test=1   # safe fallback when prefix is unparseable
+    if [ -n "$prefix_block" ]; then
+      need_test=0
+      tokens=$(printf '%s' "$prefix_block" | sed -E 's/[[:space:]]+#[0-9]+//g' | tr ',' '\n')
+      while IFS= read -r tok; do
+        [ "$(printf '%s' "$tok" | tr -d '[:space:]')" = "code" ] && need_test=1 && break
+      done <<< "$tokens"
+    fi
+
+    if [ "$need_test" -eq 1 ]; then
+      log=$(mktemp)
+      if ! cargo test --workspace --quiet >"$log" 2>&1; then
+        printf 'cargo test --workspace failed on %s branch. Commit blocked.\n' "$current_branch" >&2
+        tail -80 "$log" >&2
+        rm -f "$log"
+        exit 2
+      fi
+      if ! (cd tchart-editor && pnpm test) >"$log" 2>&1; then
+        printf 'pnpm --dir tchart-editor test failed on %s branch. Commit blocked.\n' "$current_branch" >&2
+        tail -80 "$log" >&2
+        rm -f "$log"
+        exit 2
+      fi
+      rm -f "$log"
+    else
+      printf 'INFO: prefix [%s] on %s; test suites skipped per branch-sync skill.\n' "$prefix_block" "$current_branch" >&2
+    fi
+    ;;
+esac
 
 exit 0
