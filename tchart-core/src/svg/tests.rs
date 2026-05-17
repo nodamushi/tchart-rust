@@ -1,6 +1,8 @@
 //! SVG renderer tests covering structure, gap/transition contracts,
 //! transitions, escaping, arrows, guides, and labels.
 
+use roxmltree::{Document, Node};
+
 use crate::anchor::AnchorRegistry;
 use crate::arrow::{Arrow, ArrowEnd, ArrowHead, ArrowStyle, LineDashStyle};
 use crate::color::Color;
@@ -17,6 +19,145 @@ use crate::units::Px;
 use super::buf::SvgBuf;
 use super::render;
 
+// -----------------------------------------------------------------------------
+// roxmltree-based assertion helpers (project rule: tests must inspect SVG via a
+// real XML parser, never by raw-string scans of tags/attributes).
+// -----------------------------------------------------------------------------
+
+fn parse_svg(svg: &str) -> Document<'_> {
+    Document::parse(svg).expect("rendered SVG must be well-formed XML")
+}
+
+fn find_layer<'doc, 'input>(
+    doc: &'doc Document<'input>,
+    class_name: &str,
+) -> Option<Node<'doc, 'input>> {
+    doc.root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("g"))
+        .find(|node| node.attribute("class") == Some(class_name))
+}
+
+fn layer_descendants<'doc, 'input>(
+    doc: &'doc Document<'input>,
+    class_name: &str,
+) -> impl Iterator<Item = Node<'doc, 'input>> {
+    find_layer(doc, class_name)
+        .into_iter()
+        .flat_map(|layer| layer.descendants().filter(|node| node.is_element()))
+}
+
+fn layer_element_count(doc: &Document<'_>, class_name: &str, tag: &str) -> usize {
+    layer_descendants(doc, class_name)
+        .filter(|node| node.has_tag_name(tag))
+        .count()
+}
+
+fn layer_collect_attribute(
+    doc: &Document<'_>,
+    class_name: &str,
+    tag: &str,
+    attribute: &str,
+) -> Vec<String> {
+    layer_descendants(doc, class_name)
+        .filter(|node| node.has_tag_name(tag))
+        .filter_map(|node| node.attribute(attribute).map(str::to_owned))
+        .collect()
+}
+
+/// Whether the named layer is present at all.
+fn has_layer(doc: &Document<'_>, class_name: &str) -> bool {
+    find_layer(doc, class_name).is_some()
+}
+
+/// Whether any element inside the named layer has `attribute == value`.
+/// Returns `false` when the layer is omitted.
+fn layer_has_attribute_value(
+    doc: &Document<'_>,
+    class_name: &str,
+    attribute: &str,
+    value: &str,
+) -> bool {
+    layer_descendants(doc, class_name).any(|node| node.attribute(attribute) == Some(value))
+}
+
+/// Whether any element inside the named layer has an attribute whose value
+/// contains `needle` as a substring.
+fn layer_any_attribute_value_contains(doc: &Document<'_>, class_name: &str, needle: &str) -> bool {
+    layer_descendants(doc, class_name).any(|node| {
+        node.attributes()
+            .any(|attribute| attribute.value().contains(needle))
+    })
+}
+
+/// Whether any descendant text of the named layer contains `needle`.
+fn layer_any_text_contains(doc: &Document<'_>, class_name: &str, needle: &str) -> bool {
+    let Some(layer) = find_layer(doc, class_name) else {
+        return false;
+    };
+    layer
+        .descendants()
+        .filter(|node| node.is_text())
+        .any(|node| node.text().is_some_and(|text| text.contains(needle)))
+}
+
+/// Whether any descendant text equals `expected` (no surrounding noise).
+fn layer_any_text_equals(doc: &Document<'_>, class_name: &str, expected: &str) -> bool {
+    let Some(layer) = find_layer(doc, class_name) else {
+        return false;
+    };
+    layer
+        .descendants()
+        .filter(|node| node.is_text())
+        .any(|node| node.text() == Some(expected))
+}
+
+/// Whether any element anywhere in the SVG has local name `tag`.
+fn has_element_with_tag(doc: &Document<'_>, tag: &str) -> bool {
+    doc.root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.has_tag_name(tag))
+}
+
+/// Total count of elements anywhere in the SVG whose local name is `tag`.
+fn count_elements_with_tag(doc: &Document<'_>, tag: &str) -> usize {
+    doc.root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name(tag))
+        .count()
+}
+
+/// Read a numeric attribute on the first element with `tag` inside the
+/// named layer (panics on miss).
+fn first_element_attribute_f32(
+    doc: &Document<'_>,
+    class_name: &str,
+    tag: &str,
+    attribute: &str,
+) -> f32 {
+    let layer = find_layer(doc, class_name)
+        .unwrap_or_else(|| panic!("layer class=\"{class_name}\" must exist"));
+    let element = layer
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name(tag))
+        .unwrap_or_else(|| panic!("no <{tag}> in layer {class_name}"));
+    let value = element
+        .attribute(attribute)
+        .unwrap_or_else(|| panic!("<{tag}> in layer {class_name} missing `{attribute}` attribute"));
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("<{tag}> `{attribute}` is not a number: {value:?}"))
+}
+
+/// Document-order position of the named layer among all elements. Returns
+/// `None` when the layer is omitted from the SVG.
+fn layer_document_index(doc: &Document<'_>, class_name: &str) -> Option<usize> {
+    doc.root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .position(|node| node.has_tag_name("g") && node.attribute("class") == Some(class_name))
+}
+
 /// Stub `FontMetrics` used throughout SVG renderer tests.
 struct TestFonts;
 
@@ -27,22 +168,7 @@ impl crate::layout::FontMetrics for TestFonts {
 }
 
 fn make_signal(name: &str, elements: Vec<WaveformElement>, style: &ChartStyle) -> Line {
-    let body = signal_box_size(&elements, style);
-    let row = build_row(name, elements, style, body);
-    Line::new_with_bounding_box(
-        LineContent::Signal(Box::new(row)),
-        None,
-        Rect {
-            origin: Point {
-                x: Px(10.0),
-                y: Px(10.0),
-            },
-            size: Size {
-                width: Px(40.0) + body.width,
-                height: Px(20.0),
-            },
-        },
-    )
+    make_signal_with_bounding_box_y(name, elements, style, Px(10.0))
 }
 
 fn make_signal_with_bounding_box_y(
@@ -115,7 +241,7 @@ fn signal_box_size(elements: &[WaveformElement], style: &ChartStyle) -> Size {
     }
 }
 
-fn make_doc(lines: Vec<Line>) -> ChartDocument {
+fn make_document(lines: Vec<Line>) -> ChartDocument {
     ChartDocument::new(
         ChartStyle::default(),
         lines,
@@ -134,16 +260,32 @@ fn transition(kind: TransitionKind, from: SignalLevel, to: SignalLevel) -> Wavef
 
 #[test]
 fn root_has_namespaces() {
-    let svg = render(&make_doc(vec![]), &TestFonts);
-    assert!(svg.starts_with("<svg "));
-    assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
-    assert!(svg.contains("xmlns:tchart=\"http://tchart-rust/1.0\""));
-    assert!(svg.ends_with("</svg>"));
+    let svg = render(&make_document(vec![]), &TestFonts);
+    // The default namespace and the `tchart` namespace prefix must be bound
+    // on the root element. roxmltree exposes namespace URIs directly.
+    let doc = parse_svg(&svg);
+    let root = doc.root_element();
+    assert_eq!(root.tag_name().name(), "svg");
+    assert_eq!(
+        root.tag_name().namespace(),
+        Some("http://www.w3.org/2000/svg")
+    );
+    // Look up the `tchart` prefix's URI.
+    let tchart_namespace = root
+        .namespaces()
+        .find(|namespace| namespace.name() == Some("tchart"))
+        .map(|namespace| namespace.uri().to_owned());
+    assert_eq!(
+        tchart_namespace.as_deref(),
+        Some("http://tchart-rust/1.0"),
+        "xmlns:tchart must bind to http://tchart-rust/1.0: {svg}"
+    );
 }
 
 #[test]
 fn empty_doc_emits_no_layer_groups_iter1() {
-    let svg = render(&make_doc(vec![]), &TestFonts);
+    let svg = render(&make_document(vec![]), &TestFonts);
+    let doc = parse_svg(&svg);
     let names = [
         "row-backgrounds",
         "highlights",
@@ -156,9 +298,8 @@ fn empty_doc_emits_no_layer_groups_iter1() {
         "overlays",
     ];
     for name in names {
-        let needle = format!("class=\"{name}\"");
         assert!(
-            !svg.contains(&needle),
+            !has_layer(&doc, name),
             "empty document must not emit `{name}` layer (spec: empty-layer suppression): {svg}"
         );
     }
@@ -169,6 +310,7 @@ fn populated_doc_emits_layers_in_spec_order_iter1() {
     let svg = render_pipeline(
         "@title Demo\n@bgcolor0 #fde\n@bgcolor1 #fde\nA _?_~_@{a}_|_[mark]_\nB _~@{b}_\n@-> (@{a}, @{b})\n% 1 1 over\n",
     );
+    let doc = parse_svg(&svg);
     let names = [
         "row-backgrounds",
         "highlights",
@@ -180,38 +322,70 @@ fn populated_doc_emits_layers_in_spec_order_iter1() {
         "arrows",
         "overlays",
     ];
-    let mut cursor = 0usize;
+    let mut last_pos: Option<usize> = None;
     for name in names {
-        let needle = format!("class=\"{name}\"");
-        let position = svg[cursor..]
-            .find(&needle)
-            .unwrap_or_else(|| panic!("layer {name} missing or out of order in {svg}"));
-        cursor += position + needle.len();
+        let pos = layer_document_index(&doc, name)
+            .unwrap_or_else(|| panic!("layer {name} missing in {svg}"));
+        if let Some(previous) = last_pos {
+            assert!(
+                previous < pos,
+                "layer {name} out of order (previous index {previous}, found {pos}): {svg}"
+            );
+        }
+        last_pos = Some(pos);
     }
 }
 
 #[test]
 fn metadata_embeds_tcml() {
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.source = TcmlSource::new("Clock _~_~");
     let svg = render(&document, &TestFonts);
-    assert!(svg.contains("<metadata><tchart:source>Clock _~_~</tchart:source></metadata>"));
+    // Confirm <metadata>/<tchart:source> wrap the verbatim TCML text.
+    let doc = parse_svg(&svg);
+    let source_text: String = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("source"))
+        .map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect()
+        })
+        .expect("<tchart:source> must be present");
+    assert_eq!(source_text, "Clock _~_~");
 }
 
 #[test]
 fn metadata_escapes_xml() {
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.source = TcmlSource::new("a<b&c>");
     let svg = render(&document, &TestFonts);
-    assert!(svg.contains("a&lt;b&amp;c&gt;"));
+    // The renderer must entity-escape `<`, `&`, `>` for the SVG to parse at
+    // all. After parsing the text node carries the decoded literal.
+    let doc = parse_svg(&svg);
+    let source_text: String = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("source"))
+        .map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect()
+        })
+        .expect("<tchart:source> must be present");
+    assert_eq!(source_text, "a<b&c>");
 }
 
 #[test]
 fn signal_low_emits_polyline() {
     let style = ChartStyle::default();
     let line = make_signal("ck", vec![level(SignalLevel::Low, 2)], &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    assert!(svg.contains("<polyline"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "polyline"));
 }
 
 #[test]
@@ -227,12 +401,10 @@ fn single_edge_no_independent_line_in_waveforms() {
         level(SignalLevel::High, 1),
     ];
     let line = make_signal("ck", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let waveforms_open = svg.find("class=\"waveforms\"").expect("waveforms");
-    let waveforms_close = svg[waveforms_open..].find("</g>").expect("close") + waveforms_open;
-    let layer = &svg[waveforms_open..waveforms_close];
-    assert!(layer.contains("<polyline"));
-    assert!(!layer.contains("<line"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "waveforms", "polyline") > 0);
+    assert!(layer_element_count(&doc, "waveforms", "line") == 0);
 }
 
 #[test]
@@ -244,8 +416,9 @@ fn gap_flushes_polyline() {
         level(SignalLevel::High, 2),
     ];
     let line = make_signal("ck", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let count = svg.matches("<polyline").count();
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let count = count_elements_with_tag(&doc, "polyline");
     assert!(
         count >= 2,
         "expected >=2 polylines after gap, got {count} in {svg}"
@@ -261,8 +434,9 @@ fn bus_open_emits_two_rails() {
         level(SignalLevel::Bus, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let count = svg.matches("<polyline").count();
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let count = count_elements_with_tag(&doc, "polyline");
     assert!(count >= 2, "BusOpen requires 2 rails, got {count}");
 }
 
@@ -275,8 +449,9 @@ fn bus_cross_swaps_rails() {
         level(SignalLevel::Bus, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    assert!(svg.matches("<polyline").count() >= 2);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(count_elements_with_tag(&doc, "polyline") >= 2);
 }
 
 #[test]
@@ -292,10 +467,9 @@ fn dontcare_emits_polygon_in_dontcares_layer() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let start = svg.find("class=\"dontcares\"").expect("dontcares");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("<polygon"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "dontcares", "polygon") > 0);
 }
 
 /// DontCare の `<rect>` のデフォルト fill は `url(#dontcare-hatch-1)` を参照する。
@@ -309,13 +483,11 @@ fn dontcare_default_fill_references_hatch_pattern() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let start = svg.find("class=\"dontcares\"").expect("dontcares layer");
-    let end = svg[start..].find("</g>").expect("close tag") + start;
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        svg[start..end].contains("fill=\"url(#dontcare-hatch-1)\""),
-        "expected fill=url(#dontcare-hatch-1) in dontcares layer: {}",
-        &svg[start..end]
+        layer_has_attribute_value(&doc, "dontcares", "fill", "url(#dontcare-hatch-1)"),
+        "expected fill=url(#dontcare-hatch-1) in dontcares layer: {svg}"
     );
 }
 
@@ -329,27 +501,27 @@ fn dontcare_outputs_hatch_pattern_in_defs() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    assert!(
-        svg.contains("<defs>"),
-        "expected <defs> in SVG output: {svg}"
-    );
-    assert!(
-        svg.contains("id=\"dontcare-hatch-1\""),
-        "expected dontcare-hatch-1 pattern in <defs>: {svg}"
-    );
-    assert!(
-        svg.contains("patternUnits=\"userSpaceOnUse\""),
-        "expected patternUnits in pattern: {svg}"
-    );
-    assert!(
-        svg.contains("patternTransform=\"rotate(45)\""),
-        "expected patternTransform rotate(45) in pattern: {svg}"
-    );
-    assert!(
-        svg.contains("stroke=\"#bbbbbb\""),
-        "expected default <line stroke=\"#bbbbbb\"> in dontcare-hatch pattern: {svg}"
-    );
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "defs"), "expected <defs>: {svg}");
+    let pattern = first_pattern(&doc).expect("dontcare-hatch <pattern> must be present");
+    assert_eq!(pattern.attribute("id"), Some("dontcare-hatch-1"));
+    assert_eq!(pattern.attribute("patternUnits"), Some("userSpaceOnUse"));
+    assert_eq!(pattern.attribute("patternTransform"), Some("rotate(45)"));
+    assert_eq!(first_pattern_line_stroke(&doc).as_deref(), Some("#bbbbbb"));
+}
+
+/// First `<pattern>` element anywhere in the SVG, in document order.
+fn first_pattern<'doc, 'input>(doc: &'doc Document<'input>) -> Option<Node<'doc, 'input>> {
+    doc.root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("pattern"))
+}
+
+/// `stroke` attribute of the first `<line>` element nested in the first
+/// `<pattern>` (i.e. the hatch stroke colour).
+fn first_pattern_line_stroke(doc: &Document<'_>) -> Option<String> {
+    first_pattern(doc).and_then(|pattern| pattern_line_stroke(&pattern))
 }
 
 /// Render an SVG with one signal row containing a DontCare element, using the
@@ -378,22 +550,24 @@ fn render_dontcare_color_svg(color_str: &str) -> String {
 #[test]
 fn dontcare_color_directive_bakes_into_pattern_stroke() {
     let svg = render_dontcare_color_svg("#c00");
-    assert!(
-        svg.contains("stroke=\"#cc0000\""),
-        "expected hatch <line stroke=\"#cc0000\"> baked into <defs>: {svg}"
+    let doc = parse_svg(&svg);
+    assert_eq!(
+        first_pattern_line_stroke(&doc).as_deref(),
+        Some("#cc0000"),
+        "expected hatch <line stroke=\"#cc0000\">: {svg}"
     );
-    let start = svg.find("class=\"dontcares\"").expect("dontcares layer");
-    let end = svg[start..].find("</g>").expect("close tag") + start;
-    assert!(
-        svg[start..end].contains("fill=\"url(#dontcare-hatch-1)\""),
-        "expected fill=url(#dontcare-hatch-1): {}",
-        &svg[start..end]
-    );
-    assert!(
-        !svg[start..end].contains(" color=") && !svg[start..end].contains(" stroke="),
-        "expected no extra attributes on dontcare rect (only fill): {}",
-        &svg[start..end]
-    );
+    assert!(layer_has_attribute_value(
+        &doc,
+        "dontcares",
+        "fill",
+        "url(#dontcare-hatch-1)"
+    ));
+    let layer = find_layer(&doc, "dontcares").expect("dontcares layer");
+    let has_extra = layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("polygon"))
+        .any(|node| node.attribute("color").is_some() || node.attribute("stroke").is_some());
+    assert!(!has_extra, "no extra attrs on dontcare polygon: {svg}");
 }
 
 /// Render two rows that share the same dontcare color and return the SVG.
@@ -422,18 +596,25 @@ fn render_two_rows_same_dontcare_color(color_str: &str) -> String {
 #[test]
 fn dontcare_dedupes_same_color_into_one_pattern() {
     let svg = render_two_rows_same_dontcare_color("#c00");
+    let doc = parse_svg(&svg);
     assert_eq!(
-        svg.matches("<pattern").count(),
+        count_elements_with_tag(&doc, "pattern"),
         1,
         "expected exactly 1 <pattern> for one unique color: {svg}"
     );
+    let pattern_ids: Vec<String> = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("pattern"))
+        .filter_map(|node| node.attribute("id").map(str::to_owned))
+        .collect();
     assert!(
-        svg.contains("id=\"dontcare-hatch-1\""),
-        "expected dontcare-hatch-1 id: {svg}"
+        pattern_ids.iter().any(|id| id == "dontcare-hatch-1"),
+        "expected dontcare-hatch-1 id: {pattern_ids:?}"
     );
     assert!(
-        !svg.contains("dontcare-hatch-2"),
-        "did not expect dontcare-hatch-2 for single color: {svg}"
+        !pattern_ids.iter().any(|id| id == "dontcare-hatch-2"),
+        "did not expect dontcare-hatch-2 for single color: {pattern_ids:?}"
     );
 }
 
@@ -464,53 +645,50 @@ fn render_two_rows_two_dontcare_colors() -> String {
 #[test]
 fn dontcare_two_colors_emit_two_patterns_in_first_use_order() {
     let svg = render_two_rows_two_dontcare_colors();
-    let pattern1_idx = svg
-        .find("id=\"dontcare-hatch-1\"")
-        .expect("pattern 1 missing");
-    let pattern2_idx = svg
-        .find("id=\"dontcare-hatch-2\"")
-        .expect("pattern 2 missing");
-    assert!(
-        pattern1_idx < pattern2_idx,
-        "expected pattern 1 before pattern 2: {svg}"
+    let doc = parse_svg(&svg);
+    // Walk patterns in document order. `descendants()` is document-order, so
+    // collecting ids gives the emission order directly.
+    let ids: Vec<String> = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("pattern"))
+        .filter_map(|node| node.attribute("id").map(str::to_owned))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["dontcare-hatch-1".to_owned(), "dontcare-hatch-2".to_owned()],
+        "patterns must emit in first-used-color order: {svg}"
     );
-    let pattern1_end = svg[pattern1_idx..]
-        .find("</pattern>")
-        .expect("closing pattern1 tag")
-        + pattern1_idx;
-    assert!(
-        svg[pattern1_idx..pattern1_end].contains("stroke=\"#cc0000\""),
-        "expected pattern 1 stroke #cc0000 (first-used color): {}",
-        &svg[pattern1_idx..pattern1_end]
-    );
-    let pattern2_end = svg[pattern2_idx..]
-        .find("</pattern>")
-        .expect("closing pattern2 tag")
-        + pattern2_idx;
-    assert!(
-        svg[pattern2_idx..pattern2_end].contains("stroke=\"#0066cc\""),
-        "expected pattern 2 stroke #0066cc: {}",
-        &svg[pattern2_idx..pattern2_end]
-    );
+    let strokes: Vec<Option<String>> = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("pattern"))
+        .map(|pattern| pattern_line_stroke(&pattern))
+        .collect();
+    assert_eq!(strokes[0].as_deref(), Some("#cc0000"));
+    assert_eq!(strokes[1].as_deref(), Some("#0066cc"));
+}
+
+fn pattern_line_stroke(pattern: &Node<'_, '_>) -> Option<String> {
+    pattern
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("line"))
+        .and_then(|line_node| line_node.attribute("stroke"))
+        .map(str::to_owned)
 }
 
 /// 各行の `fill` が対応する `<pattern>` ID を参照する。
 #[test]
 fn dontcare_two_colors_each_row_fill_references_its_pattern() {
     let svg = render_two_rows_two_dontcare_colors();
-    let dontcares_start = svg.find("class=\"dontcares\"").expect("dontcares layer");
-    let dontcares_end = svg[dontcares_start..]
-        .find("</g>")
-        .expect("closing dontcares tag")
-        + dontcares_start;
-    let layer = &svg[dontcares_start..dontcares_end];
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("fill=\"url(#dontcare-hatch-1)\""),
-        "expected first row fill = pattern 1: {layer}"
+        layer_has_attribute_value(&doc, "dontcares", "fill", "url(#dontcare-hatch-1)"),
+        "expected first row fill = pattern 1: {svg}"
     );
     assert!(
-        layer.contains("fill=\"url(#dontcare-hatch-2)\""),
-        "expected second row fill = pattern 2: {layer}"
+        layer_has_attribute_value(&doc, "dontcares", "fill", "url(#dontcare-hatch-2)"),
+        "expected second row fill = pattern 2: {svg}"
     );
 }
 
@@ -558,9 +736,10 @@ fn no_dontcare_means_no_defs() {
     let style = ChartStyle::default();
     let elements = vec![level(SignalLevel::Low, 2), level(SignalLevel::High, 2)];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        !svg.contains("<defs>"),
+        !has_element_with_tag(&doc, "defs"),
         "expected no <defs> when chart has no DontCare elements: {svg}"
     );
 }
@@ -576,10 +755,9 @@ fn highlight_emits_rect() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let start = svg.find("class=\"highlights\"").expect("highlights");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("<rect"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "highlights", "rect") > 0);
 }
 
 #[test]
@@ -591,18 +769,28 @@ fn guide_emits_line() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let start = svg.find("class=\"guides\"").expect("guides");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("<line"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "guides", "line") > 0);
 }
 
 #[test]
 fn label_text_escaped() {
     let style = ChartStyle::default();
     let line = make_signal("A<B&C>", vec![level(SignalLevel::Low, 1)], &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    assert!(svg.contains("A&lt;B&amp;C&gt;"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    // The parsed DOM gives the decoded label "A<B&C>" — proves the renderer
+    // entity-escaped the dangerous characters at the byte level (else
+    // roxmltree::Document::parse would fail).
+    let doc = parse_svg(&svg);
+    let has_label = doc
+        .root_element()
+        .descendants()
+        .any(|node| node.is_text() && node.text().is_some_and(|text| text.contains("A<B&C>")));
+    assert!(
+        has_label,
+        "label text must round-trip as raw `A<B&C>`: {svg}"
+    );
 }
 
 #[test]
@@ -628,15 +816,14 @@ fn title_row_emits_text() {
             },
         },
     );
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let start = svg.find("class=\"titles\"").expect("titles");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("hello"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(layer_any_text_contains(&doc, "titles", "hello"));
 }
 
 #[test]
 fn arrow_with_end_head() {
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.annotations.arrows.push(Arrow::new(
         ArrowEnd::Absolute(Point {
             x: Px(10.0),
@@ -656,17 +843,15 @@ fn arrow_with_end_head() {
         FontSpec::default(),
     ));
     let svg = render(&document, &TestFonts);
-    let start = svg.find("class=\"arrows\"").expect("arrows");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    let layer = &svg[start..end];
-    assert!(layer.contains("<line"));
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "arrows", "line") > 0);
     // Arrow heads are rendered as <path>, not <polygon> (spec §「矢印頭」: "path で実装").
-    assert!(layer.contains("<path"));
+    assert!(layer_element_count(&doc, "arrows", "path") > 0);
 }
 
 #[test]
 fn arrow_dashed_has_dasharray() {
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.annotations.arrows.push(Arrow::new(
         ArrowEnd::Absolute(Point {
             x: Px(0.0),
@@ -686,12 +871,17 @@ fn arrow_dashed_has_dasharray() {
         FontSpec::default(),
     ));
     let svg = render(&document, &TestFonts);
-    assert!(svg.contains("stroke-dasharray=\"6 3\""));
+    let doc = parse_svg(&svg);
+    let has_dash = doc
+        .root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.attribute("stroke-dasharray") == Some("6 3"));
+    assert!(has_dash, "expected stroke-dasharray=\"6 3\": {svg}");
 }
 
 #[test]
 fn overlay_emits_text() {
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.annotations.overlays.push(TextOverlay::new(
         Point {
             x: Px(100.0),
@@ -700,9 +890,8 @@ fn overlay_emits_text() {
         UserText::parse("note").expect("t"),
     ));
     let svg = render(&document, &TestFonts);
-    let start = svg.find("class=\"overlays\"").expect("overlays");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("note"));
+    let doc = parse_svg(&svg);
+    assert!(layer_any_text_contains(&doc, "overlays", "note"));
 }
 
 #[test]
@@ -721,11 +910,15 @@ fn row_backgrounds_skip_excluded() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
-    let start = svg.find("class=\"row-backgrounds\"").expect("rb");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    let layer = &svg[start..end];
-    assert!(layer.contains("#eee"), "first row uses bgcolor0");
-    assert!(layer.contains("#ccc"), "second row uses bgcolor1");
+    let doc = parse_svg(&svg);
+    assert!(
+        layer_any_attribute_value_contains(&doc, "row-backgrounds", "#eee"),
+        "first row uses bgcolor0: {svg}"
+    );
+    assert!(
+        layer_any_attribute_value_contains(&doc, "row-backgrounds", "#ccc"),
+        "second row uses bgcolor1: {svg}"
+    );
 }
 
 #[test]
@@ -742,11 +935,15 @@ fn local_bg_overrides_stripe_color() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
-    let start = svg.find("class=\"row-backgrounds\"").expect("rb");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    let layer = &svg[start..end];
-    assert!(layer.contains("#ff00ff"), "uses local @bg color");
-    assert!(!layer.contains("#eeeeee"), "stripe color is suppressed");
+    let doc = parse_svg(&svg);
+    assert!(
+        layer_any_attribute_value_contains(&doc, "row-backgrounds", "#ff00ff"),
+        "uses local @bg color: {svg}"
+    );
+    assert!(
+        !layer_any_attribute_value_contains(&doc, "row-backgrounds", "#eeeeee"),
+        "stripe color is suppressed: {svg}"
+    );
 }
 
 #[test]
@@ -768,12 +965,19 @@ fn local_bg_advances_stripe_index_for_signal_rows() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
-    let start = svg.find("class=\"row-backgrounds\"").expect("rb");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    let layer = &svg[start..end];
-    assert!(layer.contains("#ff00ff"), "row 1 uses local bg");
-    assert!(layer.contains("#cccccc"), "row 2 uses bgcolor1 (odd slot)");
-    assert!(!layer.contains("#eeeeee"), "bgcolor0 not used");
+    let doc = parse_svg(&svg);
+    assert!(
+        layer_any_attribute_value_contains(&doc, "row-backgrounds", "#ff00ff"),
+        "row 1 uses local bg: {svg}"
+    );
+    assert!(
+        layer_any_attribute_value_contains(&doc, "row-backgrounds", "#cccccc"),
+        "row 2 uses bgcolor1 (odd slot): {svg}"
+    );
+    assert!(
+        !layer_any_attribute_value_contains(&doc, "row-backgrounds", "#eeeeee"),
+        "bgcolor0 not used: {svg}"
+    );
 }
 
 fn make_title_line(background: Option<Color>) -> Line {
@@ -805,25 +1009,30 @@ fn make_title_line(background: Option<Color>) -> Line {
 #[test]
 fn local_bg_paints_title_row() {
     let line = make_title_line(Some(Color::parse("#ff0").expect("yellow")));
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let start = svg.find("class=\"row-backgrounds\"").expect("rb");
-    let end = svg[start..].find("</g>").expect("close") + start;
-    assert!(svg[start..end].contains("#ffff00"));
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert!(layer_any_attribute_value_contains(
+        &doc,
+        "row-backgrounds",
+        "#ffff00"
+    ));
 }
 
 #[test]
 fn title_row_without_local_bg_has_no_background() {
     let line = make_title_line(None);
-    let mut doc = make_doc(vec![line]);
-    doc.style.set_bgcolor0(Color::parse("#eee").expect("c0"));
-    let svg = render(&doc, &TestFonts);
+    let mut chart_document = make_document(vec![line]);
+    chart_document
+        .style
+        .set_bgcolor0(Color::parse("#eee").expect("c0"));
+    let svg = render(&chart_document, &TestFonts);
+    let doc = parse_svg(&svg);
     // Spec (svg-rendering.md §「空レイヤーの省略」): a `<g class="row-backgrounds">`
     // with no `<rect>` children is omitted entirely. Either the layer is absent,
     // or it is present and contains no `<rect>`. Both are valid.
-    let row_bg_section = extract_layer(&svg, "row-backgrounds");
     assert!(
-        !row_bg_section.contains("<rect"),
-        "title row without @bg must produce no background rect; got: {row_bg_section}"
+        layer_element_count(&doc, "row-backgrounds", "rect") == 0,
+        "title row without @bg must produce no background rect: {svg}"
     );
 }
 
@@ -855,30 +1064,36 @@ fn make_title_line_with_align(align: HorizontalAlign) -> Line {
     )
 }
 
-fn extract_titles_layer(svg: &str) -> &str {
-    extract_layer(svg, "titles")
-}
-
 #[test]
 fn title_center_emits_middle_anchor() {
     let line = make_title_line_with_align(HorizontalAlign::Center);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_titles_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("text-anchor=\"middle\""),
+        layer_has_attribute_value(&doc, "titles", "text-anchor", "middle"),
         "center should use middle anchor"
     );
-    assert!(!layer.contains("text-anchor=\"start\""));
-    assert!(!layer.contains("text-anchor=\"end\""));
+    assert!(!layer_has_attribute_value(
+        &doc,
+        "titles",
+        "text-anchor",
+        "start"
+    ));
+    assert!(!layer_has_attribute_value(
+        &doc,
+        "titles",
+        "text-anchor",
+        "end"
+    ));
 }
 
 #[test]
 fn title_left_emits_start_anchor() {
     let line = make_title_line_with_align(HorizontalAlign::Left);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_titles_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("text-anchor=\"start\""),
+        layer_has_attribute_value(&doc, "titles", "text-anchor", "start"),
         "left should use start anchor"
     );
 }
@@ -886,10 +1101,10 @@ fn title_left_emits_start_anchor() {
 #[test]
 fn title_right_emits_end_anchor() {
     let line = make_title_line_with_align(HorizontalAlign::Right);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_titles_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("text-anchor=\"end\""),
+        layer_has_attribute_value(&doc, "titles", "text-anchor", "end"),
         "right should use end anchor"
     );
 }
@@ -898,28 +1113,23 @@ fn title_right_emits_end_anchor() {
 fn title_center_x_is_bbox_center() {
     // bbox.origin.x=10, bbox.size.width=200 -> center x = 10 + 200/2 = 110
     let line = make_title_line_with_align(HorizontalAlign::Center);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_titles_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("x=\"110\""),
-        "center x should be 110 (10 + 200/2), got layer: {}",
-        layer
+        layer_has_attribute_value(&doc, "titles", "x", "110"),
+        "center x should be 110 (10 + 200/2): {svg}"
     );
 }
 
 #[test]
 fn anchor_registry_unused_for_render() {
     // Ensure rendering does not panic on a populated anchor registry.
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.annotations.anchors = AnchorRegistry::default();
     let _ = render(&document, &TestFonts);
 }
 
 // --- DontCareAlongBus polygon tests ---
-
-fn extract_dontcares_layer(svg: &str) -> &str {
-    extract_layer(svg, "dontcares")
-}
 
 /// `=?=`: both sides Bus continue → `<polygon>` with rectangular (vertical-edge) shape.
 /// No `<rect>` should appear for `DontCareAlongBus`.
@@ -932,15 +1142,69 @@ fn dontcare_along_bus_emits_polygon_not_rect() {
         level(SignalLevel::Bus, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<polygon"),
-        "DontCareAlongBus must emit <polygon>: {layer}"
+        layer_element_count(&doc, "dontcares", "polygon") > 0,
+        "DontCareAlongBus must emit <polygon>: {svg}"
     );
     assert!(
-        !layer.contains("<rect"),
-        "DontCareAlongBus must not emit <rect>: {layer}"
+        layer_element_count(&doc, "dontcares", "rect") == 0,
+        "DontCareAlongBus must not emit <rect>: {svg}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Polygon-points comparison helpers (inline, intentionally not extracted to a
+// shared module). The dontcares polygon tests below compare floating-point
+// coordinates serialised as a `points="..."` attribute. String-equality
+// comparison is fragile to formatting changes (e.g. `60` vs `60.0` vs `59.9999`),
+// so we parse the attribute via roxmltree first and then compare with a 0.5px
+// tolerance.
+// -----------------------------------------------------------------------------
+
+/// Parse a `<polygon>`'s `points="x1,y1 x2,y2 ..."` attribute into a list of
+/// (x, y) pairs. Tokens that fail to parse are skipped silently — the caller
+/// must verify the resulting length against expectations.
+fn parse_polygon_points(points: &str) -> Vec<(f32, f32)> {
+    points
+        .split_whitespace()
+        .filter_map(|pair| {
+            let mut parts = pair.split(',');
+            let x = parts.next()?.parse().ok()?;
+            let y = parts.next()?.parse().ok()?;
+            Some((x, y))
+        })
+        .collect()
+}
+
+/// Assert that the dontcares layer contains a `<polygon>` whose parsed
+/// `points` (under `roxmltree`) match `expected` within a 0.5px tolerance on
+/// every coordinate. Useful for tests that previously relied on string
+/// equality of the raw points attribute.
+fn assert_dontcares_polygon_points_match(
+    doc: &Document<'_>,
+    expected: &[(f32, f32)],
+    label: &str,
+    svg_for_panic: &str,
+) {
+    let candidates: Vec<Vec<(f32, f32)>> = layer_descendants(doc, "dontcares")
+        .filter(|node| node.has_tag_name("polygon"))
+        .filter_map(|node| node.attribute("points"))
+        .map(parse_polygon_points)
+        .collect();
+    let matched = candidates.iter().any(|parsed| {
+        parsed.len() == expected.len()
+            && parsed.iter().zip(expected.iter()).all(
+                |(&(actual_x, actual_y), &(want_x, want_y))| {
+                    (actual_x - want_x).abs() < 0.5 && (actual_y - want_y).abs() < 0.5
+                },
+            )
+    });
+    assert!(
+        matched,
+        "{label}: no dontcares <polygon> matched expected vertices {expected:?}; \
+         got candidates {candidates:?} in {svg_for_panic}",
     );
 }
 
@@ -959,11 +1223,13 @@ fn dontcare_along_bus_both_continue_is_rectangle() {
         level(SignalLevel::Bus, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("75,12 100,12 100,28 75,28"),
-        "=?= should produce rectangular polygon, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[(75.0, 12.0), (100.0, 12.0), (100.0, 28.0), (75.0, 28.0)],
+        "=?= rectangular polygon",
+        &svg,
     );
 }
 
@@ -987,11 +1253,13 @@ fn dontcare_along_bus_low_both_sides_slash_equal_backslash() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("105,12 130,12 135,28 100,28"),
-        "_=?=_ should produce /=\\ polygon, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[(105.0, 12.0), (130.0, 12.0), (135.0, 28.0), (100.0, 28.0)],
+        "_=?=_ /=\\ polygon",
+        &svg,
     );
 }
 
@@ -1018,11 +1286,13 @@ fn dontcare_along_bus_high_both_sides_backslash_equal_slash() {
         level(SignalLevel::High, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("100,12 135,12 130,28 105,28"),
-        "~=?=~ should produce \\=/ polygon, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[(100.0, 12.0), (135.0, 12.0), (130.0, 28.0), (105.0, 28.0)],
+        "~=?=~ \\=/ polygon",
+        &svg,
     );
 }
 
@@ -1042,11 +1312,19 @@ fn dontcare_along_bus_hiz_prev_is_pentagon() {
         level(SignalLevel::Bus, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("75,20 105,12 130,12 130,28 105,28"),
-        "-=?= should produce pentagon with HiZ midpoint on left, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[
+            (75.0, 20.0),
+            (105.0, 12.0),
+            (130.0, 12.0),
+            (130.0, 28.0),
+            (105.0, 28.0),
+        ],
+        "-=?= pentagon with HiZ midpoint on left",
+        &svg,
     );
 }
 
@@ -1066,11 +1344,19 @@ fn dontcare_along_bus_hiz_next_is_pentagon() {
         level(SignalLevel::HiZ, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("75,12 100,12 105,20 100,28 75,28"),
-        "=?-= should produce pentagon with HiZ midpoint on right, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[
+            (75.0, 12.0),
+            (100.0, 12.0),
+            (105.0, 20.0),
+            (100.0, 28.0),
+            (75.0, 28.0),
+        ],
+        "=?-= pentagon with HiZ midpoint on right",
+        &svg,
     );
 }
 
@@ -1092,11 +1378,13 @@ fn dontcare_along_bus_high_prev_low_next_mixed_slant() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("100,12 130,12 135,28 105,28"),
-        "~=?=_ mixed slant polygon, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[(100.0, 12.0), (130.0, 12.0), (135.0, 28.0), (105.0, 28.0)],
+        "~=?=_ mixed slant polygon",
+        &svg,
     );
 }
 
@@ -1118,11 +1406,13 @@ fn dontcare_along_bus_continue_prev_low_next_right_slant() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("75,12 100,12 105,28 75,28"),
-        "=?=_ right slant polygon, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[(75.0, 12.0), (100.0, 12.0), (105.0, 28.0), (75.0, 28.0)],
+        "=?=_ right slant polygon",
+        &svg,
     );
 }
 
@@ -1144,11 +1434,13 @@ fn dontcare_along_bus_low_prev_continue_next_left_slant() {
         level(SignalLevel::Bus, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("105,12 130,12 130,28 100,28"),
-        "_=?= left slash polygon, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[(105.0, 12.0), (130.0, 12.0), (130.0, 28.0), (100.0, 28.0)],
+        "_=?= left slash polygon",
+        &svg,
     );
 }
 
@@ -1167,11 +1459,20 @@ fn dontcare_along_bus_both_cross_midpoints_hexagon() {
         level(SignalLevel::Bus, 2),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("77.5,20 80,12 105,12 107.5,20 105,28 80,28"),
-        "=X?X= should produce 6-point hexagon with cross midpoints, got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[
+            (77.5, 20.0),
+            (80.0, 12.0),
+            (105.0, 12.0),
+            (107.5, 20.0),
+            (105.0, 28.0),
+            (80.0, 28.0),
+        ],
+        "=X?X= 6-point hexagon with cross midpoints",
+        &svg,
     );
 }
 
@@ -1192,11 +1493,19 @@ fn dontcare_along_bus_left_cross_right_vertical_pentagon() {
         level(SignalLevel::DontCareAlongBus, 2),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("77.5,20 80,12 130,12 130,28 80,28"),
-        "=X?= should produce 5-point polygon (left cross mid), got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[
+            (77.5, 20.0),
+            (80.0, 12.0),
+            (130.0, 12.0),
+            (130.0, 28.0),
+            (80.0, 28.0),
+        ],
+        "=X?= 5-point polygon (left cross mid)",
+        &svg,
     );
 }
 
@@ -1217,11 +1526,19 @@ fn dontcare_along_bus_left_vertical_right_cross_pentagon() {
         level(SignalLevel::Bus, 2),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
-    assert!(
-        layer.contains("50,12 75,12 77.5,20 75,28 50,28"),
-        "=?X= should produce 5-point polygon (right cross mid), got: {layer}"
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    assert_dontcares_polygon_points_match(
+        &doc,
+        &[
+            (50.0, 12.0),
+            (75.0, 12.0),
+            (77.5, 20.0),
+            (75.0, 28.0),
+            (50.0, 28.0),
+        ],
+        "=?X= 5-point polygon (right cross mid)",
+        &svg,
     );
 }
 
@@ -1236,15 +1553,15 @@ fn dontcare_along_low_emits_polygon() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal("d", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_dontcares_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<polygon"),
-        "DontCareAlongLow must emit <polygon>: {layer}"
+        layer_element_count(&doc, "dontcares", "polygon") > 0,
+        "DontCareAlongLow must emit <polygon>: {svg}"
     );
     assert!(
-        !layer.contains("<rect"),
-        "DontCareAlongLow must not emit <rect>: {layer}"
+        layer_element_count(&doc, "dontcares", "rect") == 0,
+        "DontCareAlongLow must not emit <rect>: {svg}"
     );
 }
 
@@ -1304,15 +1621,10 @@ fn make_signal_line_for_layout_with_params(
     crate::line::Line::new(crate::line::LineContent::Signal(Box::new(row)), None)
 }
 
-fn extract_row_backgrounds_layer(svg: &str) -> &str {
-    extract_layer(svg, "row-backgrounds")
-}
-
-fn parse_widths_from_layer(layer: &str) -> Vec<f32> {
-    layer
-        .split("width=\"")
-        .skip(1)
-        .filter_map(|s| s.split('"').next()?.parse::<f32>().ok())
+fn collect_row_background_widths(doc: &Document<'_>) -> Vec<f32> {
+    layer_collect_attribute(doc, "row-backgrounds", "rect", "width")
+        .into_iter()
+        .filter_map(|value| value.parse::<f32>().ok())
         .collect()
 }
 
@@ -1321,12 +1633,12 @@ fn row_backgrounds_uniform_width_when_signal_lengths_differ() {
     // Both <rect width="..."> inside row-backgrounds must be the same value.
     let document = make_two_signal_doc_for_bg_test();
     let svg = render(&document, &TestFonts);
-    let layer = extract_row_backgrounds_layer(&svg);
-    let widths = parse_widths_from_layer(layer);
+    let doc = parse_svg(&svg);
+    let widths = collect_row_background_widths(&doc);
     assert_eq!(
         widths.len(),
         2,
-        "expected 2 background rects, got {}: {layer}",
+        "expected 2 background rects, got {}: {svg}",
         widths.len()
     );
     assert!(
@@ -1403,11 +1715,11 @@ fn make_signal_with_edge_mark(fill_color: &str) -> Line {
 fn edge_mark_polygon_in_edge_marks_layer() {
     // <polygon> must appear inside <g class="edge-marks">, not arrows.
     let line = make_signal_with_edge_mark("black");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_layer(&svg, "edge-marks");
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<polygon"),
-        "polygon must be in edge-marks layer, got: {layer}"
+        layer_element_count(&doc, "edge-marks", "polygon") > 0,
+        "polygon must be in edge-marks layer: {svg}"
     );
 }
 
@@ -1415,14 +1727,14 @@ fn edge_mark_polygon_in_edge_marks_layer() {
 fn edge_mark_polygon_not_in_arrows_layer() {
     // <polygon> for edge marks must NOT appear in <g class="arrows">.
     let line = make_signal_with_edge_mark("black");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     // Spec (svg-rendering.md §「空レイヤーの省略」): with no `@->` declared, the
     // `<g class="arrows">` wrapper is omitted entirely. That trivially satisfies
     // "no polygon inside arrows". When present, the layer must not contain a polygon.
-    let arrows_layer = extract_layer(&svg, "arrows");
     assert!(
-        !arrows_layer.contains("<polygon"),
-        "edge mark polygon must NOT be in arrows layer, got: {arrows_layer}"
+        layer_element_count(&doc, "arrows", "polygon") == 0,
+        "edge mark polygon must NOT be in arrows layer: {svg}"
     );
 }
 
@@ -1430,15 +1742,16 @@ fn edge_mark_polygon_not_in_arrows_layer() {
 fn edge_mark_polygon_has_fill_attribute() {
     // Polygon must have fill="color" and stroke="none".
     let line = make_signal_with_edge_mark("red");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_layer(&svg, "edge-marks");
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("fill=\"red\"") || layer.contains("fill=\"#ff0000\""),
-        "polygon must have fill=red, got: {layer}"
+        layer_has_attribute_value(&doc, "edge-marks", "fill", "red")
+            || layer_has_attribute_value(&doc, "edge-marks", "fill", "#ff0000"),
+        "polygon must have fill=red: {svg}"
     );
     assert!(
-        layer.contains("stroke=\"none\""),
-        "polygon must have stroke=none, got: {layer}"
+        layer_has_attribute_value(&doc, "edge-marks", "stroke", "none"),
+        "polygon must have stroke=none: {svg}"
     );
 }
 
@@ -1446,14 +1759,12 @@ fn edge_mark_polygon_has_fill_attribute() {
 fn edge_mark_polygon_has_three_points() {
     // Polygon has exactly 3 vertices (apex, base_left, base_right).
     let line = make_signal_with_edge_mark("black");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let polygon_start = svg.find("<polygon").expect("polygon");
-    let polygon_end = svg[polygon_start..].find("/>").expect("end") + polygon_start;
-    let polygon = &svg[polygon_start..polygon_end];
-    // Count spaces in points="x1,y1 x2,y2 x3,y3"
-    let points_start = polygon.find("points=\"").expect("points attr") + 8;
-    let points_end = polygon[points_start..].find('"').expect("close") + points_start;
-    let points_str = &polygon[points_start..points_end];
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let points_values = layer_collect_attribute(&doc, "edge-marks", "polygon", "points");
+    let points_str = points_values
+        .first()
+        .expect("edge-marks layer must contain a <polygon points=...>");
     let point_count = points_str.split_whitespace().count();
     assert_eq!(
         point_count, 3,
@@ -1465,11 +1776,12 @@ fn edge_mark_polygon_has_three_points() {
 fn edge_mark_polygon_fill_blue() {
     // mark_color=blue propagates to polygon fill.
     let line = make_signal_with_edge_mark("blue");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_layer(&svg, "edge-marks");
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("fill=\"blue\"") || layer.contains("fill=\"#0000ff\""),
-        "polygon fill must be blue, got: {layer}"
+        layer_has_attribute_value(&doc, "edge-marks", "fill", "blue")
+            || layer_has_attribute_value(&doc, "edge-marks", "fill", "#0000ff"),
+        "polygon fill must be blue: {svg}"
     );
 }
 
@@ -1508,19 +1820,15 @@ fn make_overline_signal(name: &str) -> Line {
     )
 }
 
-fn extract_signal_labels_layer(svg: &str) -> &str {
-    extract_layer(svg, "signal-labels")
-}
-
 #[test]
 fn overline_emits_independent_line_element() {
     // name_overline=true must produce a <line> in signal-labels, not text-decoration.
     let line = make_overline_signal("nReset");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<line"),
-        "overline must emit <line> element, got: {layer}"
+        layer_element_count(&doc, "signal-labels", "line") > 0,
+        "overline must emit <line> element: {svg}"
     );
 }
 
@@ -1528,10 +1836,15 @@ fn overline_emits_independent_line_element() {
 fn overline_no_text_decoration_attribute() {
     // text-decoration="overline" must NOT appear anywhere.
     let line = make_overline_signal("nReset");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let has_text_decoration = doc
+        .root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.attribute("text-decoration").is_some());
     assert!(
-        !svg.contains("text-decoration"),
-        "text-decoration must not appear in SVG output, got svg containing it"
+        !has_text_decoration,
+        "text-decoration attribute must not appear on any element: {svg}"
     );
 }
 
@@ -1539,19 +1852,22 @@ fn overline_no_text_decoration_attribute() {
 fn overline_line_has_stroke_and_stroke_width() {
     // <line> must have stroke and stroke-width attributes.
     let line = make_overline_signal("nReset");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
-    // Find the <line ...> element in the labels layer
-    let line_start = layer.find("<line").expect("line element");
-    let line_end = layer[line_start..].find("/>").expect("end") + line_start;
-    let line_elem = &layer[line_start..line_end];
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let first_overline_line = find_layer(&doc, "signal-labels")
+        .and_then(|layer| {
+            layer
+                .descendants()
+                .find(|node| node.is_element() && node.has_tag_name("line"))
+        })
+        .unwrap_or_else(|| panic!("overline <line> must exist in signal-labels: {svg}"));
     assert!(
-        line_elem.contains("stroke="),
-        "overline <line> must have stroke attribute, got: {line_elem}"
+        first_overline_line.attribute("stroke").is_some(),
+        "overline <line> must have stroke attribute: {svg}"
     );
     assert!(
-        line_elem.contains("stroke-width="),
-        "overline <line> must have stroke-width attribute, got: {line_elem}"
+        first_overline_line.attribute("stroke-width").is_some(),
+        "overline <line> must have stroke-width attribute: {svg}"
     );
 }
 
@@ -1560,11 +1876,11 @@ fn overline_false_no_line_element() {
     // name_overline=false must not emit a <line> in signal-labels.
     let style = ChartStyle::default();
     let line = make_signal("nReset", vec![level(SignalLevel::Low, 2)], &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        !layer.contains("<line"),
-        "no overline <line> when name_overline=false, got: {layer}"
+        layer_element_count(&doc, "signal-labels", "line") == 0,
+        "no overline <line> when name_overline=false: {svg}"
     );
 }
 
@@ -1572,12 +1888,12 @@ fn overline_false_no_line_element() {
 fn overline_multiline_emits_only_one_line() {
     // Multiline signal name with overline gets exactly 1 <line>.
     let line = make_overline_signal("nChip\nEnable");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
-    let count = layer.matches("<line").count();
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let count = layer_element_count(&doc, "signal-labels", "line");
     assert_eq!(
         count, 1,
-        "multiline overline must emit exactly 1 <line>, got {count} in: {layer}"
+        "multiline overline must emit exactly 1 <line>, got {count}: {svg}"
     );
 }
 
@@ -1585,25 +1901,14 @@ fn overline_multiline_emits_only_one_line() {
 fn overline_line_y_coordinates_equal() {
     // <line y1="..." y2="..."> must have equal y1 and y2 (horizontal line).
     let line = make_overline_signal("nReset");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
-    let line_start = layer.find("<line").expect("line element");
-    let line_end = layer[line_start..].find("/>").expect("end") + line_start;
-    let line_elem = &layer[line_start..line_end];
-    // Extract y1 and y2
-    let y1 = extract_attr_f32(line_elem, "y1").expect("y1 attr");
-    let y2 = extract_attr_f32(line_elem, "y2").expect("y2 attr");
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let y1 = first_element_attribute_f32(&doc, "signal-labels", "line", "y1");
+    let y2 = first_element_attribute_f32(&doc, "signal-labels", "line", "y2");
     assert!(
         (y1 - y2).abs() < 1e-3,
         "overline <line> y1 must equal y2, got y1={y1} y2={y2}"
     );
-}
-
-fn extract_attr_f32(element: &str, attr: &str) -> Option<f32> {
-    let needle = format!("{attr}=\"");
-    let start = element.find(&needle)? + needle.len();
-    let end = element[start..].find('"')? + start;
-    element[start..end].parse().ok()
 }
 
 // ---- overline x extent uses actual text width (longest line) ---------------
@@ -1621,20 +1926,16 @@ fn overline_single_line_width_is_text_width() {
     // With Right align: x1 = anchor_x - text_width = 46 - 42 = 4
     //                   x2 = anchor_x              = 46
     let line = make_overline_signal("nReset");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
-    let line_start = layer.find("<line").expect("line element");
-    let line_end = layer[line_start..].find("/>").expect("end") + line_start;
-    let line_elem = &layer[line_start..line_end];
-    let x2 = extract_attr_f32(line_elem, "x2").expect("x2 attr");
-    let x1 = extract_attr_f32(line_elem, "x1").expect("x1 attr");
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let x2 = first_element_attribute_f32(&doc, "signal-labels", "line", "x2");
+    let x1 = first_element_attribute_f32(&doc, "signal-labels", "line", "x1");
     let actual_width = x2 - x1;
     // "nReset" = 6 chars * 7.0 = 42px
     let expected_text_width = 6.0 * 7.0_f32;
     assert!(
         (actual_width - expected_text_width).abs() < 1e-3,
-        "overline width must equal text width ({expected_text_width}px), got {actual_width}px; \
-         line_elem: {line_elem}"
+        "overline width must equal text width ({expected_text_width}px), got {actual_width}px: {svg}"
     );
 }
 
@@ -1644,13 +1945,10 @@ fn overline_multiline_width_uses_longest_line() {
     // longest line ("Enable" = 6 chars = 42px), not the first line
     // ("nChip" = 5 chars = 35px).
     let line = make_overline_signal("nChip\nEnable");
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_signal_labels_layer(&svg);
-    let line_start = layer.find("<line").expect("line element");
-    let line_end = layer[line_start..].find("/>").expect("end") + line_start;
-    let line_elem = &layer[line_start..line_end];
-    let x2 = extract_attr_f32(line_elem, "x2").expect("x2 attr");
-    let x1 = extract_attr_f32(line_elem, "x1").expect("x1 attr");
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let x2 = first_element_attribute_f32(&doc, "signal-labels", "line", "x2");
+    let x1 = first_element_attribute_f32(&doc, "signal-labels", "line", "x1");
     let actual_width = x2 - x1;
     // "Enable" = 6 chars * 7.0 = 42px (longest line)
     let expected_width = 6.0 * 7.0_f32;
@@ -1659,8 +1957,7 @@ fn overline_multiline_width_uses_longest_line() {
     assert!(
         (actual_width - expected_width).abs() < 1e-3,
         "overline width must equal longest line ({expected_width}px), \
-         got {actual_width}px (first-line-only width = {first_line_width}px); \
-         line_elem: {line_elem}"
+         got {actual_width}px (first-line-only width = {first_line_width}px): {svg}"
     );
 }
 
@@ -1687,26 +1984,29 @@ fn make_arrow_with_label(label: &str, font: FontSpec) -> Arrow {
     )
 }
 
-fn extract_arrows_layer(svg: &str) -> &str {
-    extract_layer(svg, "arrows")
-}
-
 #[test]
 fn arrow_label_text_has_font_family_attribute() {
     // <text> in the arrows layer must have a font-family attribute.
     use crate::text::FontFamily;
     let family = FontFamily::parse("Comic Neue").expect("family");
     let font = FontSpec::new(family, Px(12.0));
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document
         .annotations
         .arrows
         .push(make_arrow_with_label("arrow A", font));
     let svg = render(&document, &TestFonts);
-    let layer = extract_arrows_layer(&svg);
+    let doc = parse_svg(&svg);
+    let first_arrow_text = find_layer(&doc, "arrows")
+        .and_then(|layer| {
+            layer
+                .descendants()
+                .find(|node| node.is_element() && node.has_tag_name("text"))
+        })
+        .unwrap_or_else(|| panic!("arrow label <text> must exist: {svg}"));
     assert!(
-        layer.contains("font-family="),
-        "arrow label <text> must have font-family attribute, layer: {layer}"
+        first_arrow_text.attribute("font-family").is_some(),
+        "arrow label <text> must have font-family attribute: {svg}"
     );
 }
 
@@ -1716,16 +2016,16 @@ fn arrow_label_text_font_family_value_matches_spec() {
     use crate::text::FontFamily;
     let family = FontFamily::parse("Comic Neue").expect("family");
     let font = FontSpec::new(family, Px(12.0));
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document
         .annotations
         .arrows
         .push(make_arrow_with_label("arrow A", font));
     let svg = render(&document, &TestFonts);
-    let layer = extract_arrows_layer(&svg);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("font-family=\"Comic Neue\""),
-        "arrow label <text> must have font-family=\"Comic Neue\", layer: {layer}"
+        layer_has_attribute_value(&doc, "arrows", "font-family", "Comic Neue"),
+        "arrow label <text> must have font-family=\"Comic Neue\": {svg}"
     );
 }
 
@@ -1735,23 +2035,30 @@ fn arrow_label_text_has_font_size_attribute() {
     use crate::text::FontFamily;
     let family = FontFamily::parse("Comic Neue").expect("family");
     let font = FontSpec::new(family, Px(14.0));
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document
         .annotations
         .arrows
         .push(make_arrow_with_label("label", font));
     let svg = render(&document, &TestFonts);
-    let layer = extract_arrows_layer(&svg);
+    let doc = parse_svg(&svg);
+    let first_arrow_text = find_layer(&doc, "arrows")
+        .and_then(|layer| {
+            layer
+                .descendants()
+                .find(|node| node.is_element() && node.has_tag_name("text"))
+        })
+        .unwrap_or_else(|| panic!("arrow label <text> must exist: {svg}"));
     assert!(
-        layer.contains("font-size="),
-        "arrow label <text> must have font-size attribute, layer: {layer}"
+        first_arrow_text.attribute("font-size").is_some(),
+        "arrow label <text> must have font-size attribute: {svg}"
     );
 }
 
 #[test]
 fn arrow_without_label_has_no_text_element() {
     // Sanity: arrows with no label must not emit a <text> element in the arrows layer.
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document.annotations.arrows.push(Arrow::new(
         ArrowEnd::Absolute(Point {
             x: Px(10.0),
@@ -1771,10 +2078,10 @@ fn arrow_without_label_has_no_text_element() {
         FontSpec::default(),
     ));
     let svg = render(&document, &TestFonts);
-    let layer = extract_arrows_layer(&svg);
+    let doc = parse_svg(&svg);
     assert!(
-        !layer.contains("<text"),
-        "arrow without label must not emit <text>, got: {layer}"
+        layer_element_count(&doc, "arrows", "text") == 0,
+        "arrow without label must not emit <text>: {svg}"
     );
 }
 
@@ -1787,28 +2094,28 @@ fn arrow_label_text_has_white_outline_attributes() {
     use crate::text::FontFamily;
     let family = FontFamily::parse("sans-serif").expect("family");
     let font = FontSpec::new(family, Px(14.0));
-    let mut document = make_doc(vec![]);
+    let mut document = make_document(vec![]);
     document
         .annotations
         .arrows
         .push(make_arrow_with_label("hello", font));
     let svg = render(&document, &TestFonts);
-    let layer = extract_arrows_layer(&svg);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("paint-order=\"stroke fill\""),
-        "arrow label <text> must have paint-order=\"stroke fill\", layer: {layer}"
+        layer_has_attribute_value(&doc, "arrows", "paint-order", "stroke fill"),
+        "arrow label <text> must have paint-order=\"stroke fill\": {svg}"
     );
     assert!(
-        layer.contains("stroke=\"#ffffff\""),
-        "arrow label <text> must have stroke=\"#ffffff\", layer: {layer}"
+        layer_has_attribute_value(&doc, "arrows", "stroke", "#ffffff"),
+        "arrow label <text> must have stroke=\"#ffffff\": {svg}"
     );
     assert!(
-        layer.contains("stroke-width=\"2\""),
-        "arrow label <text> must have stroke-width=\"2\", layer: {layer}"
+        layer_has_attribute_value(&doc, "arrows", "stroke-width", "2"),
+        "arrow label <text> must have stroke-width=\"2\": {svg}"
     );
     assert!(
-        layer.contains("stroke-linejoin=\"round\""),
-        "arrow label <text> must have stroke-linejoin=\"round\", layer: {layer}"
+        layer_has_attribute_value(&doc, "arrows", "stroke-linejoin", "round"),
+        "arrow label <text> must have stroke-linejoin=\"round\": {svg}"
     );
 }
 
@@ -1822,30 +2129,30 @@ fn make_alternating_bgcolor_style() -> ChartStyle {
     style
 }
 
-/// Assert that `layer` contains exactly `expected_rects` background `<rect>`s
-/// and that the colour order is bgcolor0 → bgcolor1 → bgcolor0 (alternating).
-fn assert_bgcolor_alternating_order(layer: &str, expected_rects: usize) {
-    let rect_count = layer.matches("<rect").count();
-    assert_eq!(
-        rect_count, expected_rects,
-        "expected {expected_rects} background rects, got {rect_count}: {layer}"
-    );
-    let first_eee = layer
-        .find("#eeeeee")
-        .or_else(|| layer.find("eeeeee"))
-        .expect("bgcolor0 (#eee) missing in layer");
-    let first_ccc = layer
-        .find("#cccccc")
-        .or_else(|| layer.find("cccccc"))
-        .expect("bgcolor1 (#ccc) missing in layer");
+/// Map the renderer's canonical hex fills onto stripe-slot labels so the
+/// `assert_bgcolor_alternating_order` check compares equal regardless of
+/// `#eee` vs `#eeeeee` formatting.
+fn bg_stripe_slot(value: &str) -> char {
+    match value {
+        "#eeeeee" | "#eee" => '0',
+        "#cccccc" | "#ccc" => '1',
+        _ => '?',
+    }
+}
+
+/// Assert that the row-backgrounds layer contains exactly `expected_rects`
+/// `<rect>`s and that the fill colour order is bgcolor0 → bgcolor1 → bgcolor0
+/// (alternating). The renderer canonicalises `#eee` to `#eeeeee`.
+fn assert_bgcolor_alternating_order(doc: &Document<'_>, expected_rects: usize) {
+    let fills = layer_collect_attribute(doc, "row-backgrounds", "rect", "fill");
+    assert_eq!(fills.len(), expected_rects, "fills={fills:?}");
+    let sequence: String = fills.iter().map(|fill| bg_stripe_slot(fill)).collect();
+    let first_eee = sequence.find('0').expect("bgcolor0 (#eee) missing");
+    let first_ccc = sequence.find('1').expect("bgcolor1 (#ccc) missing");
+    assert!(first_eee < first_ccc, "fills: {fills:?}");
     assert!(
-        first_eee < first_ccc,
-        "bgcolor0 (#eee) must appear before bgcolor1 (#ccc); layer: {layer}"
-    );
-    let after_first_ccc = &layer[first_ccc + 7..];
-    assert!(
-        after_first_ccc.contains("#eeeeee") || after_first_ccc.contains("eeeeee"),
-        "third row must use bgcolor0 (#eee) again; layer: {layer}"
+        sequence[first_ccc + 1..].contains('0'),
+        "third row must use bgcolor0 again; fills: {fills:?}"
     );
 }
 
@@ -1866,8 +2173,8 @@ fn bgcolor_alternates_three_signal_rows() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
-    let layer = extract_row_backgrounds_layer(&svg);
-    assert_bgcolor_alternating_order(layer, 3);
+    let doc = parse_svg(&svg);
+    assert_bgcolor_alternating_order(&doc, 3);
 }
 
 #[test]
@@ -1885,22 +2192,11 @@ fn bgcolor_rect_height_equals_bbox_height() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
-    let layer = extract_row_backgrounds_layer(&svg);
-    let height_needle = "height=\"";
-    let height_start = layer
-        .find(height_needle)
-        .expect("height attribute missing in row-backgrounds rect")
-        + height_needle.len();
-    let height_end = layer[height_start..]
-        .find('"')
-        .expect("height attribute close quote")
-        + height_start;
-    let actual_height: f32 = layer[height_start..height_end]
-        .parse()
-        .expect("height value is not a valid f32");
+    let doc = parse_svg(&svg);
+    let actual_height = first_element_attribute_f32(&doc, "row-backgrounds", "rect", "height");
     assert!(
         (actual_height - expected_height.to_f32()).abs() < 1e-3,
-        "rect height ({actual_height:.1}) must equal bbox height ({:.1}); layer: {layer}",
+        "rect height ({actual_height:.1}) must equal bbox height ({:.1}): {svg}",
         expected_height.to_f32()
     );
 }
@@ -1975,8 +2271,8 @@ fn skip_and_title_excluded_from_stripe_count() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
-    let layer = extract_row_backgrounds_layer(&svg);
-    assert_bgcolor_alternating_order(layer, 3);
+    let doc = parse_svg(&svg);
+    assert_bgcolor_alternating_order(&doc, 3);
 }
 
 #[test]
@@ -1992,66 +2288,46 @@ fn bgcolor_none_emits_no_rect() {
         TcmlSource::new(""),
     );
     let svg = render(&document, &TestFonts);
+    let doc = parse_svg(&svg);
     // Spec (svg-rendering.md §「空レイヤーの省略」): when no `<rect>` is produced,
     // the `<g class="row-backgrounds">` wrapper itself is omitted. Either form
     // (layer absent, or layer present with no rect) satisfies "no rect emitted".
-    let layer = extract_layer(&svg, "row-backgrounds");
     assert!(
-        !layer.contains("<rect"),
-        "bgcolor=none must emit no rect in row-backgrounds; got: {layer}"
+        layer_element_count(&doc, "row-backgrounds", "rect") == 0,
+        "bgcolor=none must emit no rect in row-backgrounds: {svg}"
     );
 }
 
 // ---- Low↔HiZ / High↔HiZ SingleEdge でギャップがないことを確認 -------------
 
 /// Extract all `points="..."` attribute values from `<polyline>` elements in `waveforms` layer.
-fn collect_polyline_points(svg: &str) -> Vec<String> {
-    let waveforms_start = svg.find("class=\"waveforms\"").expect("waveforms layer");
-    let waveforms_end = svg[waveforms_start..].find("</g>").expect("close") + waveforms_start;
-    let layer = &svg[waveforms_start..waveforms_end];
-    let mut result = Vec::new();
-    let mut search = layer;
-    while let Some(polyline_offset) = search.find("<polyline points=\"") {
-        let points_start = polyline_offset + "<polyline points=\"".len();
-        let Some(points_end) = search[points_start..].find('"') else {
-            break;
-        };
-        result.push(search[points_start..points_start + points_end].to_owned());
-        search = &search[points_start + points_end..];
-    }
-    result
+fn collect_polyline_points(doc: &Document<'_>) -> Vec<String> {
+    layer_collect_attribute(doc, "waveforms", "polyline", "points")
 }
 
 /// Split waveform polylines into `(solid, dashed)` lists based on the
-/// presence of `stroke-dasharray=` on each `<polyline>` element.
+/// presence of a `stroke-dasharray` attribute on each `<polyline>` element.
 ///
 /// Used by HiZ-boundary connection tests that must not depend on the
 /// flush order between solid and dashed accumulators.
-fn collect_polyline_points_by_style(svg: &str) -> (Vec<String>, Vec<String>) {
-    let waveforms_start = svg.find("class=\"waveforms\"").expect("waveforms layer");
-    let waveforms_end = svg[waveforms_start..].find("</g>").expect("close") + waveforms_start;
-    let layer = &svg[waveforms_start..waveforms_end];
+fn collect_polyline_points_by_style(doc: &Document<'_>) -> (Vec<String>, Vec<String>) {
     let mut solid = Vec::new();
     let mut dashed = Vec::new();
-    let mut search = layer;
-    while let Some(open) = search.find("<polyline") {
-        let tag_rest = &search[open..];
-        let Some(tag_end) = tag_rest.find("/>") else {
-            break;
+    let Some(layer) = find_layer(doc, "waveforms") else {
+        return (solid, dashed);
+    };
+    for node in layer
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("polyline"))
+    {
+        let Some(points) = node.attribute("points") else {
+            continue;
         };
-        let tag = &tag_rest[..tag_end + 2];
-        if let Some(points_start_offset) = tag.find("points=\"") {
-            let after_points = &tag[points_start_offset + "points=\"".len()..];
-            if let Some(points_end) = after_points.find('"') {
-                let points = after_points[..points_end].to_owned();
-                if tag.contains("stroke-dasharray") {
-                    dashed.push(points);
-                } else {
-                    solid.push(points);
-                }
-            }
+        if node.attribute("stroke-dasharray").is_some() {
+            dashed.push(points.to_owned());
+        } else {
+            solid.push(points.to_owned());
         }
-        search = &tag_rest[tag_end + 2..];
     }
     (solid, dashed)
 }
@@ -2101,8 +2377,9 @@ fn low_to_hiz_single_edge_no_gap_with_slant() {
         level(SignalLevel::HiZ, 1),
     ];
     let line = make_signal_with_slant2(elements);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let all_points = collect_polyline_points(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let all_points = collect_polyline_points(&doc);
     // Low is in `top` accum, HiZ+transition in `hiz` accum.
     // Expect >=2 polylines: one solid (Low), one dashed (transition + HiZ).
     assert!(
@@ -2135,8 +2412,9 @@ fn hiz_to_low_single_edge_no_gap_with_slant() {
         level(SignalLevel::Low, 1),
     ];
     let line = make_signal_with_slant2(elements);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let (solid, dashed) = collect_polyline_points_by_style(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let (solid, dashed) = collect_polyline_points_by_style(&doc);
     assert!(
         !solid.is_empty() && !dashed.is_empty(),
         "HiZ→Low with slant should produce both a solid and a dashed polyline, \
@@ -2165,8 +2443,9 @@ fn high_to_hiz_single_edge_no_gap_with_slant() {
         level(SignalLevel::HiZ, 1),
     ];
     let line = make_signal_with_slant2(elements);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let all_points = collect_polyline_points(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let all_points = collect_polyline_points(&doc);
     assert!(
         all_points.len() >= 2,
         "High→HiZ with slant should produce >=2 polylines, got {}: {svg}",
@@ -2196,8 +2475,9 @@ fn hiz_to_high_single_edge_no_gap_with_slant() {
         level(SignalLevel::High, 1),
     ];
     let line = make_signal_with_slant2(elements);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let (solid, dashed) = collect_polyline_points_by_style(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let (solid, dashed) = collect_polyline_points_by_style(&doc);
     assert!(
         !solid.is_empty() && !dashed.is_empty(),
         "HiZ→High with slant should produce both a solid and a dashed polyline, \
@@ -2215,11 +2495,6 @@ fn hiz_to_high_single_edge_no_gap_with_slant() {
 
 // ---- Waveform Text (level-string text characters) ----
 
-/// Extract the raw content of `<g class="waveforms">…</g>` from `svg`.
-fn extract_waveforms_layer(svg: &str) -> &str {
-    extract_layer(svg, "waveforms")
-}
-
 #[test]
 fn waveform_text_element_is_in_waveforms_layer() {
     // Scenario: waveforms layer contains a <text text-anchor="middle"> for Text element.
@@ -2229,19 +2504,19 @@ fn waveform_text_element_is_in_waveforms_layer() {
         WaveformElement::Text(UserText::parse("abc").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("<text"),
-        "waveforms layer must contain <text> element, layer: {layer}"
+        layer_element_count(&doc, "waveforms", "text") > 0,
+        "waveforms layer must contain <text> element: {svg}"
     );
     assert!(
-        layer.contains("text-anchor=\"middle\""),
-        "waveform <text> must have text-anchor=\"middle\", layer: {layer}"
+        layer_has_attribute_value(&doc, "waveforms", "text-anchor", "middle"),
+        "waveform <text> must have text-anchor=\"middle\": {svg}"
     );
     assert!(
-        layer.contains(">abc</text>"),
-        "waveform <text> must contain abc, layer: {layer}"
+        layer_any_text_equals(&doc, "waveforms", "abc"),
+        "waveform <text> must contain abc: {svg}"
     );
 }
 
@@ -2254,11 +2529,11 @@ fn waveform_text_x_is_center_of_owning_run() {
         WaveformElement::Text(UserText::parse("abc").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("x=\"100\""),
-        "waveform <text> x must be 100 (center of 4-unit Low at step=25), layer: {layer}"
+        layer_has_attribute_value(&doc, "waveforms", "x", "100"),
+        "waveform <text> x must be 100 (center of 4-unit Low at step=25): {svg}"
     );
 }
 
@@ -2271,11 +2546,11 @@ fn waveform_text_y_is_vertical_center_of_signal_box() {
         WaveformElement::Text(UserText::parse("abc").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("y=\"20\""),
-        "waveform <text> y must be 20 (vertical center of signal box), layer: {layer}"
+        layer_has_attribute_value(&doc, "waveforms", "y", "20"),
+        "waveform <text> y must be 20 (vertical center of signal box): {svg}"
     );
 }
 
@@ -2288,16 +2563,16 @@ fn waveform_text_multiple_fragments_produce_one_text_element() {
         WaveformElement::Text(UserText::parse("a b").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
-    let count = layer.matches("<text").count();
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let count = layer_element_count(&doc, "waveforms", "text");
     assert_eq!(
         count, 1,
-        "exactly one <text> element expected, got {count}, layer: {layer}"
+        "exactly one <text> element expected, got {count}: {svg}"
     );
     assert!(
-        layer.contains(">a b</text>"),
-        "text content must be space-joined fragments, layer: {layer}"
+        layer_any_text_equals(&doc, "waveforms", "a b"),
+        "text content must be space-joined fragments: {svg}"
     );
 }
 
@@ -2313,11 +2588,11 @@ fn waveform_text_has_font_family_attribute() {
         WaveformElement::Text(UserText::parse("abc").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("font-family=\"Comic Neue\""),
-        "waveform <text> must have font-family attribute, layer: {layer}"
+        layer_has_attribute_value(&doc, "waveforms", "font-family", "Comic Neue"),
+        "waveform <text> must have font-family=\"Comic Neue\": {svg}"
     );
 }
 
@@ -2330,36 +2605,41 @@ fn waveform_text_has_no_clip_path() {
         WaveformElement::Text(UserText::parse("long label").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
+    let has_clip_path_attr =
+        layer_descendants(&doc, "waveforms").any(|node| node.attribute("clip-path").is_some());
     assert!(
-        !layer.contains("clip-path"),
-        "waveform <text> must not have a clip-path (overflow is allowed), layer: {layer}"
+        !has_clip_path_attr,
+        "waveform <text> must not have a clip-path attribute: {svg}"
     );
     assert!(
-        !layer.contains("<clipPath"),
-        "waveforms layer must not define a <clipPath> element, layer: {layer}"
+        layer_element_count(&doc, "waveforms", "clipPath") == 0,
+        "waveforms layer must not define a <clipPath> element: {svg}"
     );
 }
 
 #[test]
 fn waveform_text_xml_escaping() {
-    // Characters like < > & must be XML-escaped in the text content.
+    // Characters like < > & must be XML-escaped in the text content. After
+    // parsing via roxmltree the entities round-trip back to the source
+    // characters, so the literal "<a&b>" must appear in a text node and no
+    // stray unescaped `<a>` element must exist.
     let style = ChartStyle::default();
     let elements = vec![
         WaveformElement::Level(LevelRun::new(SignalLevel::Low, 4)),
         WaveformElement::Text(UserText::parse("<a&b>").expect("text")),
     ];
     let line = make_signal("SigA", elements, &style);
-    let svg = render(&make_doc(vec![line]), &TestFonts);
-    let layer = extract_waveforms_layer(&svg);
+    let svg = render(&make_document(vec![line]), &TestFonts);
+    let doc = parse_svg(&svg);
     assert!(
-        layer.contains("&lt;a&amp;b&gt;"),
-        "text content must be XML-escaped, layer: {layer}"
+        layer_any_text_equals(&doc, "waveforms", "<a&b>"),
+        "text content must round-trip as <a&b>: {svg}"
     );
     assert!(
-        !layer.contains("<a&b>"),
-        "unescaped angle bracket must not appear in output, layer: {layer}"
+        !has_element_with_tag(&doc, "a"),
+        "unescaped <a> element must not appear in output: {svg}"
     );
 }
 
@@ -2370,26 +2650,29 @@ fn render_pipeline(source: &str) -> String {
     render(&document, &fonts)
 }
 
-fn extract_layer<'svg>(svg: &'svg str, layer_class: &str) -> &'svg str {
-    let needle = format!("class=\"{layer_class}\"");
-    let Some(open) = svg.find(&needle) else {
-        return "";
-    };
-    let after_open = &svg[open..];
-    let close = after_open.find("</g>").unwrap_or(after_open.len());
-    &after_open[..close]
-}
-
 #[test]
 fn style_element_appears_after_metadata_before_defs() {
     let svg = render_pipeline("Sig _?_\n");
-    let metadata_pos = svg.find("</metadata>");
-    let style_pos = svg.find("<style");
-    let defs_pos = svg.find("<defs");
-    if let (Some(metadata), Some(style), Some(defs)) = (metadata_pos, style_pos, defs_pos) {
+    let doc = parse_svg(&svg);
+    let metadata = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .position(|node| node.has_tag_name("metadata"));
+    let style = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .position(|node| node.has_tag_name("style"));
+    let defs = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .position(|node| node.has_tag_name("defs"));
+    if let (Some(m), Some(s), Some(d)) = (metadata, style, defs) {
         assert!(
-            metadata < style && style < defs,
-            "expected metadata < style < defs; got {metadata} < {style} < {defs}"
+            m < s && s < d,
+            "expected metadata < style < defs; got {m} < {s} < {d}"
         );
     }
 }
@@ -2397,8 +2680,9 @@ fn style_element_appears_after_metadata_before_defs() {
 #[test]
 fn defs_element_omitted_when_no_dontcare_present() {
     let svg = render_pipeline("Sig _~_~\n");
+    let doc = parse_svg(&svg);
     assert!(
-        !svg.contains("<defs"),
+        !has_element_with_tag(&doc, "defs"),
         "<defs> must be absent without ?; got {svg}"
     );
 }
@@ -2435,11 +2719,26 @@ fn dontcare_pattern_uses_user_space_units() {
 #[test]
 fn tcml_source_xml_special_characters_are_escaped() {
     let svg = render_pipeline("@title <foo&bar>\nSig _\n");
-    let source_open = svg.find("<tchart:source").expect("tchart:source");
-    let after = &svg[source_open..];
-    let close = after.find("</tchart:source>").expect("close");
-    let inner = &after[..close];
-    assert!(inner.contains("&lt;") && inner.contains("&amp;") && inner.contains("&gt;"));
+    // The `<tchart:source>` element must round-trip the literal TCML source.
+    // After roxmltree parses the XML, the entity-escaped form (&lt; / &amp; /
+    // &gt;) is decoded back to the original characters, so the surviving text
+    // node carries the raw `<foo&bar>` substring.
+    let doc = parse_svg(&svg);
+    let source_text: String = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("source"))
+        .map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect()
+        })
+        .expect("<tchart:source> must be present");
+    assert!(
+        source_text.contains('<') && source_text.contains('&') && source_text.contains('>'),
+        "source text must round-trip raw <, &, >: {source_text:?}"
+    );
 }
 
 #[test]
@@ -2451,115 +2750,168 @@ fn cdata_section_not_used_for_source_with_brackets() {
 #[test]
 fn svg_root_includes_page_margin_in_dimensions() {
     let svg = render_pipeline("@page-margin 10\nSig _~_~\n");
-    let width_key = "width=\"";
-    let start = svg.find(width_key).expect("width") + width_key.len();
-    let end = svg[start..].find('"').expect("close");
-    let width: f32 = svg[start..start + end].parse().expect("number");
+    let width: f32 = parse_svg(&svg)
+        .root_element()
+        .attribute("width")
+        .and_then(|value| value.parse().ok())
+        .expect("svg root must have width=...");
     assert!(width > 20.0, "width must include page margins; got {width}");
 }
 
 #[test]
 fn row_backgrounds_layer_behaviour_is_deterministic_when_empty() {
     let svg = render_pipeline("@bgcolor0 none\n@bgcolor1 none\nSig _\n");
+    let doc = parse_svg(&svg);
     // Either present-and-empty or omitted; must be deterministic.
-    let _ = svg.contains("class=\"row-backgrounds\"");
+    let _ = has_layer(&doc, "row-backgrounds");
 }
 
 #[test]
 fn arrows_layer_contains_only_user_arrows_not_edge_marks() {
     let svg = render_pipeline("@clock(pos) ck\nA _~@{a}__\nB ___@{b}_\n@-> (@{a}, @{b})\n");
-    let arrows = extract_layer(&svg, "arrows");
-    let waveforms = extract_layer(&svg, "waveforms");
+    let doc = parse_svg(&svg);
     // Clock triangle markers must live in the dedicated `edge-marks` layer,
     // never the `arrows` layer.
     assert!(
-        !arrows.contains("<polygon"),
-        "arrows layer must not contain edge marks; got {arrows}"
+        layer_element_count(&doc, "arrows", "polygon") == 0,
+        "arrows layer must not contain edge marks: {svg}"
     );
-    let _ = waveforms;
 }
 
 #[test]
 fn anchors_do_not_emit_visible_geometry() {
     let svg = render_pipeline("Sig _~@{a}__@1__\n");
-    assert!(!svg.contains(">@{a}"));
-    assert!(!svg.contains(">@1"));
+    // Anchor labels (`@{a}`, `@1`) must not surface as the *visible* text of
+    // any `<text>` element. (They are still allowed inside `<tchart:source>`
+    // because that holds the verbatim TCML source, not visible geometry.)
+    let doc = parse_svg(&svg);
+    let visible_anchor_text = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("text"))
+        .flat_map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect::<Vec<_>>()
+        })
+        .any(|text| text.contains("@{a}") || text.contains("@1"));
+    assert!(
+        !visible_anchor_text,
+        "anchor labels must not be rendered as visible <text> content: {svg}"
+    );
 }
 
 #[test]
 fn title_align_center_uses_text_anchor_middle() {
     let svg = render_pipeline("@titlealign center\n@title T\nSig _\n");
-    let titles = extract_layer(&svg, "titles");
-    assert!(titles.contains("text-anchor=\"middle\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc,
+        "titles",
+        "text-anchor",
+        "middle"
+    ));
 }
 
 #[test]
 fn title_align_left_uses_text_anchor_start() {
     let svg = render_pipeline("@titlealign left\n@title T\nSig _\n");
-    let titles = extract_layer(&svg, "titles");
-    assert!(titles.contains("text-anchor=\"start\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc,
+        "titles",
+        "text-anchor",
+        "start"
+    ));
 }
 
 #[test]
 fn title_align_right_uses_text_anchor_end() {
     let svg = render_pipeline("@titlealign right\n@title T\nSig _\n");
-    let titles = extract_layer(&svg, "titles");
-    assert!(titles.contains("text-anchor=\"end\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc,
+        "titles",
+        "text-anchor",
+        "end"
+    ));
 }
 
 #[test]
 fn bus_segment_text_uses_middle_anchor() {
     let svg = render_pipeline("Sig ==A==\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    assert!(waveforms.contains("text-anchor=\"middle\""));
-    assert!(waveforms.contains(">A<"));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc,
+        "waveforms",
+        "text-anchor",
+        "middle"
+    ));
+    assert!(layer_any_text_equals(&doc, "waveforms", "A"));
 }
 
 #[test]
 fn long_text_in_short_segment_is_not_clipped() {
     let svg = render_pipeline("Sig __VeryLongText__\n");
-    assert!(!svg.contains("clip-path"));
+    let doc = parse_svg(&svg);
+    let has_clip_attr = doc
+        .root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.attribute("clip-path").is_some());
+    assert!(!has_clip_attr, "no clip-path attribute expected: {svg}");
 }
 
 #[test]
 fn hiz_segment_uses_dasharray() {
     let svg = render_pipeline("Sig ____----____\n");
-    assert!(svg.contains("stroke-dasharray"));
+    // HiZ runs render as dashed polylines.
+    let doc = parse_svg(&svg);
+    let has_dash = doc
+        .root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.attribute("stroke-dasharray").is_some());
+    assert!(has_dash, "stroke-dasharray must appear: {svg}");
 }
 
 #[test]
 fn arrow_label_has_paint_order_stroke_decoration() {
     let svg = render_pipeline("A _~@{a}_\nB _~@{b}_\n@-> (@{a}, @{b}) label1\n");
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
     assert!(
-        arrows.contains("paint-order=\"stroke fill\"")
-            || arrows.contains("stroke=\"#ffffff\"")
-            || arrows.contains("stroke=\"#fff\""),
-        "arrow label must have white outline; got {arrows}"
+        layer_has_attribute_value(&doc, "arrows", "paint-order", "stroke fill")
+            || layer_has_attribute_value(&doc, "arrows", "stroke", "#ffffff")
+            || layer_has_attribute_value(&doc, "arrows", "stroke", "#fff"),
+        "arrow label must have white outline: {svg}"
     );
 }
 
 #[test]
 fn arrow_without_label_omits_label_text_element() {
     let svg = render_pipeline("A _~@{a}_\nB _~@{b}_\n@-> (@{a}, @{b})\n");
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
     // No label means no paint-order stroke decoration on a separate text element.
-    assert!(!arrows.contains("paint-order=\"stroke fill\""));
+    assert!(!layer_has_attribute_value(
+        &doc,
+        "arrows",
+        "paint-order",
+        "stroke fill"
+    ));
 }
 
 #[test]
 fn arrow_head_none_omits_arrow_head_polygon() {
     let svg = render_pipeline("A _~@{a}_\nB _~@{b}_\n@-> (@{a}, @{b}, head=none)\n");
-    let arrows = extract_layer(&svg, "arrows");
-    assert!(!arrows.contains("<polygon"));
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "arrows", "polygon") == 0);
 }
 
 #[test]
 fn arrow_head_both_emits_two_arrow_heads() {
     let svg = render_pipeline("A _~@{a}_\nB _~@{b}_\n@-> (@{a}, @{b}, head=both)\n");
-    let arrows = extract_layer(&svg, "arrows");
-    let polygons = arrows.matches("<polygon").count();
-    let paths = arrows.matches("<path").count();
+    let doc = parse_svg(&svg);
+    let polygons = layer_element_count(&doc, "arrows", "polygon");
+    let paths = layer_element_count(&doc, "arrows", "path");
     assert!(
         polygons + paths >= 2,
         "head=both must produce two markers; got {polygons} polygons + {paths} paths"
@@ -2569,8 +2921,13 @@ fn arrow_head_both_emits_two_arrow_heads() {
 #[test]
 fn arrow_dashed_uses_dasharray_attribute() {
     let svg = render_pipeline("A _~@{a}_\nB _~@{b}_\n@-> (@{a}, @{b}, dashed)\n");
-    let arrows = extract_layer(&svg, "arrows");
-    assert!(arrows.contains("stroke-dasharray"));
+    let doc = parse_svg(&svg);
+    let has_dash =
+        layer_descendants(&doc, "arrows").any(|node| node.attribute("stroke-dasharray").is_some());
+    assert!(
+        has_dash,
+        "stroke-dasharray must be present in arrows: {svg}"
+    );
 }
 
 #[test]
@@ -2583,32 +2940,37 @@ fn arrow_dotted_uses_distinct_dasharray() {
 #[test]
 fn guide_does_not_extend_through_title_row() {
     let svg = render_pipeline("@title T1\nSig __|__\n@title T2\nSig2 _~\n");
-    let guides = extract_layer(&svg, "guides");
+    let doc = parse_svg(&svg);
     assert!(
-        !guides.is_empty(),
-        "guide layer must exist when `|` is present"
+        has_layer(&doc, "guides"),
+        "guide layer must exist when `|` is present: {svg}"
     );
 }
 
 #[test]
 fn guide_extends_above_first_row_when_no_title_above() {
     let svg = render_pipeline("Sig __|__\n");
-    let guides = extract_layer(&svg, "guides");
-    assert!(!guides.is_empty());
+    let doc = parse_svg(&svg);
+    assert!(has_layer(&doc, "guides"));
 }
 
 #[test]
 fn highlight_extends_into_page_margin_like_guide() {
     let svg = render_pipeline("Sig __[__]__\n");
-    let highlights = extract_layer(&svg, "highlights");
-    assert!(!highlights.is_empty());
+    let doc = parse_svg(&svg);
+    assert!(has_layer(&doc, "highlights"));
 }
 
 #[test]
 fn highlight_rect_carries_user_provided_style_attributes() {
     let svg = render_pipeline("@highlight_style fill=\"#8f8\" stroke=\"green\"\nSig __[__]__\n");
-    let highlights = extract_layer(&svg, "highlights");
-    assert!(highlights.contains("fill=\"#8f8\"") || highlights.contains("fill='#8f8'"));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc,
+        "highlights",
+        "fill",
+        "#8f8"
+    ));
 }
 
 #[test]
@@ -2616,23 +2978,30 @@ fn clock_edge_mark_polygon_vertices_are_present() {
     let svg = render_pipeline(
         "@step 10\n@slant 2\n@clockmark_height 5\n@clockmark_width 4\n@clockmark_position 0.5\n@clock(pos) ck\nT ____\n",
     );
-    assert!(svg.contains("<polygon"), "clock edge mark polygon expected");
+    let doc = parse_svg(&svg);
+    assert!(
+        has_element_with_tag(&doc, "polygon"),
+        "clock edge mark polygon expected: {svg}"
+    );
 }
 
 #[test]
 fn clock_edge_mark_uses_supplied_fill_color() {
     let svg = render_pipeline("@clock(pos, mark_color=red) ck\nT ____\n");
-    assert!(
-        svg.contains("fill=\"red\"") || svg.contains("fill='red'"),
-        "clock mark fill must be red; got {svg}"
-    );
+    let doc = parse_svg(&svg);
+    let has_red_fill = doc
+        .root_element()
+        .descendants()
+        .any(|node| node.is_element() && node.attribute("fill") == Some("red"));
+    assert!(has_red_fill, "clock mark fill must be red: {svg}");
 }
 
 #[test]
 fn clock_edge_mark_height_is_clamped_to_line_length() {
     // A very large mark_height must not produce inverted polygon coordinates.
     let svg = render_pipeline("@step 10\n@slant 2\n@clockmark_height 100\n@clock(pos) ck\nT __\n");
-    assert!(svg.contains("<polygon"));
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "polygon"));
 }
 
 // ---- clockmark default + step-linked shrink (SVG pipeline) -----------
@@ -2742,62 +3111,67 @@ fn pipeline_clockmark_global_width_before_step_change_no_shrink() {
 #[test]
 fn signal_overline_uses_line_element_not_text_decoration() {
     let svg = render_pipeline("@signal(overline) nReset _~\n");
-    let labels = extract_layer(&svg, "signal-labels");
+    let doc = parse_svg(&svg);
+    let has_text_decoration = layer_descendants(&doc, "signal-labels")
+        .any(|node| node.attribute("text-decoration").is_some());
     assert!(
-        !labels.contains("text-decoration"),
-        "overline must not be a text-decoration"
+        !has_text_decoration,
+        "overline must not be a text-decoration: {svg}"
     );
-    assert!(labels.contains("<line"));
+    assert!(layer_element_count(&doc, "signal-labels", "line") > 0);
 }
 
 #[test]
 fn overline_line_width_matches_longest_label_row() {
     let svg = render_pipeline("@signal(overline) \"short\\nverylongline\" _~\n");
-    let labels = extract_layer(&svg, "signal-labels");
-    assert!(labels.contains("<line"));
+    let doc = parse_svg(&svg);
+    assert!(layer_element_count(&doc, "signal-labels", "line") > 0);
 }
 
 #[test]
 fn overline_inherits_label_color() {
     let svg = render_pipeline("@signal_color blue\n@signal(overline) nReset _~\n");
-    let labels = extract_layer(&svg, "signal-labels");
+    let doc = parse_svg(&svg);
     assert!(
-        labels.contains("stroke=\"blue\"") || labels.contains("stroke='blue'"),
-        "overline must inherit label color (blue); got {labels}"
+        layer_has_attribute_value(&doc, "signal-labels", "stroke", "blue"),
+        "overline must inherit label color (blue): {svg}"
     );
 }
 
 #[test]
 fn dontcare_along_bus_yields_rectangle_when_both_sides_continue() {
     let svg = render_pipeline("Sig =?=\n");
-    let layer = extract_layer(&svg, "dontcares");
-    let alt = extract_layer(&svg, "waveforms");
+    let doc = parse_svg(&svg);
     assert!(
-        !layer.is_empty() || alt.contains("<polygon") || alt.contains("<rect"),
-        "DontCare polygon expected somewhere; svg={svg}"
+        has_layer(&doc, "dontcares")
+            || layer_element_count(&doc, "waveforms", "polygon") > 0
+            || layer_element_count(&doc, "waveforms", "rect") > 0,
+        "DontCare polygon expected somewhere: {svg}"
     );
 }
 
 #[test]
 fn dontcare_along_bus_open_close_yields_hexagonal_polygon() {
     let svg = render_pipeline("Sig _=?=_\n");
-    assert!(svg.contains("<polygon"));
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "polygon"));
 }
 
 #[test]
 fn dontcare_along_buscross_uses_cross_midpoint_vertices() {
     let svg = render_pipeline("Sig =X?X=\n");
-    assert!(svg.contains("<polygon"));
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "polygon"));
 }
 
 #[test]
 fn dontcare_rectangle_has_no_stroke_outline() {
     let svg = render_pipeline("Sig _?_\n");
-    let layer = extract_layer(&svg, "dontcares");
-    if !layer.is_empty() {
+    let doc = parse_svg(&svg);
+    if has_layer(&doc, "dontcares") {
         assert!(
-            !layer.contains("stroke=\"black\""),
-            "DontCare rect must not have outline; got {layer}"
+            !layer_has_attribute_value(&doc, "dontcares", "stroke", "black"),
+            "DontCare rect must not have outline: {svg}"
         );
     }
 }
@@ -2805,16 +3179,24 @@ fn dontcare_rectangle_has_no_stroke_outline() {
 #[test]
 fn malicious_font_value_is_emitted_as_attribute_only() {
     let svg = render_pipeline("@font \"monospace; }body{...}\"\nSig _\n");
-    let style_open = svg.find("<style");
-    if let Some(style_open) = style_open {
-        let style_section = &svg[style_open..];
-        let close = style_section
-            .find("</style>")
-            .unwrap_or(style_section.len());
-        let inner = &style_section[..close];
+    // If any `<style>` element exists, its text content must NOT carry the CSS
+    // injection payload. roxmltree gives the decoded text content; the test
+    // would still pass if the renderer stores the malicious string inside a
+    // `font-family=` attribute (which is the desired outcome).
+    let doc = parse_svg(&svg);
+    let style_node = doc
+        .root_element()
+        .descendants()
+        .find(|node| node.is_element() && node.has_tag_name("style"));
+    if let Some(style) = style_node {
+        let body: String = style
+            .descendants()
+            .filter(|child| child.is_text())
+            .filter_map(|child| child.text())
+            .collect();
         assert!(
-            !inner.contains("body{"),
-            "CSS injection payload must not appear in <style>; got {inner}"
+            !body.contains("body{"),
+            "CSS injection payload must not appear in <style>: {body}"
         );
     }
 }
@@ -2822,8 +3204,8 @@ fn malicious_font_value_is_emitted_as_attribute_only() {
 #[test]
 fn polyline_accumulator_flushes_after_gap() {
     let svg = render_pipeline("Sig ____:____\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    let polylines = waveforms.matches("<polyline").count();
+    let doc = parse_svg(&svg);
+    let polylines = layer_element_count(&doc, "waveforms", "polyline");
     assert!(
         polylines >= 2,
         "Gap must split polylines (>=2); got {polylines}"
@@ -2833,8 +3215,8 @@ fn polyline_accumulator_flushes_after_gap() {
 #[test]
 fn polyline_accumulator_does_not_flush_at_highlight_boundary() {
     let svg = render_pipeline("Sig __[__]__\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    let polylines = waveforms.matches("<polyline").count();
+    let doc = parse_svg(&svg);
+    let polylines = layer_element_count(&doc, "waveforms", "polyline");
     assert!(
         polylines == 1,
         "Highlight must not flush polylines; got {polylines}"
@@ -2844,8 +3226,8 @@ fn polyline_accumulator_does_not_flush_at_highlight_boundary() {
 #[test]
 fn polyline_accumulator_does_not_flush_at_anchor() {
     let svg = render_pipeline("Sig __@{a}__\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    let polylines = waveforms.matches("<polyline").count();
+    let doc = parse_svg(&svg);
+    let polylines = layer_element_count(&doc, "waveforms", "polyline");
     assert!(
         polylines == 1,
         "Anchor must not flush polylines; got {polylines}"
@@ -2876,43 +3258,54 @@ fn clock_auto_with_bg_overrides_bgcolor0() {
 #[test]
 fn per_row_step_with_arrow_renders_arrow_line() {
     let svg = render_pipeline("@step 10\nA _~@{a}_\n@step 20\nB _~@{b}_\n@-> (@{a}, @{b})\n");
-    let arrows = extract_layer(&svg, "arrows");
-    assert!(arrows.contains("<line") || arrows.contains("<path"));
+    let doc = parse_svg(&svg);
+    assert!(
+        layer_element_count(&doc, "arrows", "line") > 0
+            || layer_element_count(&doc, "arrows", "path") > 0
+    );
 }
 
 #[test]
 fn dontcare_highlight_anchor_combination_render_independent_layers() {
     let svg = render_pipeline("Sig __[?]@{a}__\n");
+    let doc = parse_svg(&svg);
     assert!(
-        svg.contains("class=\"dontcares\"") || svg.contains("class=\"highlights\""),
-        "expected at least one specialised layer; got {svg}"
+        has_layer(&doc, "dontcares") || has_layer(&doc, "highlights"),
+        "expected at least one specialised layer: {svg}"
     );
 }
 
 #[test]
 fn bus_cross_with_highlight_and_dontcare_coexist() {
     let svg = render_pipeline("Sig =[X?X]=\n");
-    assert!(svg.contains("<polygon"));
+    let doc = parse_svg(&svg);
+    assert!(has_element_with_tag(&doc, "polygon"));
 }
 
 #[test]
 fn signal_overline_with_multiline_name_and_bg_combine() {
     let svg = render_pipeline("@bg #ff0\n@signal(overline) \"ne\\nrst\" _~\n");
+    let doc = parse_svg(&svg);
     assert!(svg.contains("#ff0") || svg.contains("#FFFF00"));
-    let labels = extract_layer(&svg, "signal-labels");
-    assert!(labels.contains("<line"));
+    assert!(layer_element_count(&doc, "signal-labels", "line") > 0);
 }
 
 #[test]
 fn title_align_right_with_bg_uses_user_color_not_stripe() {
     let svg = render_pipeline("@bgcolor1 blue\n@bg red\n@titlealign right\n@title \"T\"\nSig _\n");
-    let titles = extract_layer(&svg, "titles");
-    assert!(titles.contains("text-anchor=\"end\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc,
+        "titles",
+        "text-anchor",
+        "end"
+    ));
 }
 
 #[test]
 fn layer_z_order_respects_spec_order() {
     let svg = render_pipeline("@clock(pos) ck\nA __[?@{a}__]__\nB __\n@-> (@{a}, @{a})\n");
+    let doc = parse_svg(&svg);
     let order_keys = [
         "row-backgrounds",
         "highlights",
@@ -2925,7 +3318,7 @@ fn layer_z_order_respects_spec_order() {
     ];
     let mut last_position = 0usize;
     for key in order_keys {
-        if let Some(position) = svg.find(&format!("class=\"{key}\"")) {
+        if let Some(position) = layer_document_index(&doc, key) {
             assert!(
                 position >= last_position,
                 "layer {key} appears before previous layer; svg={svg}"
@@ -2936,10 +3329,11 @@ fn layer_z_order_respects_spec_order() {
 }
 
 fn parse_width(svg: &str) -> f32 {
-    let key = "width=\"";
-    let start = svg.find(key).expect("width") + key.len();
-    let end = svg[start..].find('"').expect("close");
-    svg[start..start + end].parse().expect("number")
+    parse_svg(svg)
+        .root_element()
+        .attribute("width")
+        .and_then(|value| value.parse().ok())
+        .expect("svg root width must be present and parseable")
 }
 
 // ---------------------------------------------------------------------------
@@ -2951,46 +3345,43 @@ fn root_svg_child_order_is_fixed_iter1() {
     // `@bgcolor0` ensures the `row-backgrounds` layer has content and therefore
     // is emitted (spec §「空レイヤーの省略」 omits empty layers).
     let svg = render_pipeline("@bgcolor0 #fde\n@title \"T\"\nSig _?_\n");
-    // Use only the open tag offsets so the comparison reflects element start
-    // positions; the `</metadata>` close tag is later in the document and
-    // would mask an out-of-order arrangement.
-    let metadata = svg
-        .find("<metadata")
-        .expect("<metadata> open tag must be present");
-    let style = svg.find("<style").expect("<style> must be present");
-    let defs = svg
-        .find("<defs")
-        .expect("<defs> must be present (? produces hatch)");
-    let row_bg = svg
-        .find("class=\"row-backgrounds\"")
-        .expect("row-backgrounds group must be present");
-    assert!(
-        metadata < style,
-        "metadata must precede style; got metadata={metadata} style={style}"
-    );
-    assert!(
-        style < defs,
-        "style must precede defs; got style={style} defs={defs}"
-    );
-    assert!(
-        defs < row_bg,
-        "defs must precede row-backgrounds; got defs={defs} row_bg={row_bg}"
-    );
+    let doc = parse_svg(&svg);
+    let metadata = element_position(&doc, "metadata").expect("<metadata>");
+    let style = element_position(&doc, "style").expect("<style>");
+    let defs = element_position(&doc, "defs").expect("<defs> (? produces hatch)");
+    let row_bg = layer_document_index(&doc, "row-backgrounds").expect("row-backgrounds");
+    assert!(metadata < style, "metadata={metadata} style={style}");
+    assert!(style < defs, "style={style} defs={defs}");
+    assert!(defs < row_bg, "defs={defs} row_bg={row_bg}");
+}
+
+/// Document-order index of the first element with the given local name,
+/// counting only elements (text nodes ignored).
+fn element_position(doc: &Document<'_>, tag: &str) -> Option<usize> {
+    doc.root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .position(|node| node.has_tag_name(tag))
 }
 
 #[test]
 fn defs_omitted_when_no_dontcare_iter1() {
     let svg = render_pipeline("A _~_~\n");
+    let doc = parse_svg(&svg);
     assert!(
-        !svg.contains("<defs"),
-        "<defs> must be absent without ?; got {svg}"
+        !has_element_with_tag(&doc, "defs"),
+        "<defs> must be absent without ?: {svg}"
     );
 }
 
 #[test]
 fn defs_present_with_single_dontcare_iter1() {
     let svg = render_pipeline("A _?_\n");
-    assert!(svg.contains("<defs"), "<defs> must exist with ?; got {svg}");
+    let doc = parse_svg(&svg);
+    assert!(
+        has_element_with_tag(&doc, "defs"),
+        "<defs> must exist with ?: {svg}"
+    );
     assert!(
         svg.contains("dontcare-hatch-1"),
         "first hatch id must be dontcare-hatch-1"
@@ -3019,18 +3410,32 @@ fn title_xml_special_chars_escaped_iter1() {
 #[test]
 fn arrow_label_xml_special_chars_escaped_iter1() {
     let svg = render_pipeline("A _@{a}_\nB _@{b}_\n@-> (@{a}, @{b}) <abc>&<xyz>\n");
-    let arrows = extract_layer(&svg, "arrows");
+    // Once parsed, the entity-escaped XML round-trips back to the raw label
+    // characters. The fact that the SVG parses at all proves the renderer
+    // escaped the dangerous characters (otherwise the `<abc>` literal would
+    // have created bogus elements that roxmltree would reject).
+    let doc = parse_svg(&svg);
+    let label_text: String = layer_descendants(&doc, "arrows")
+        .filter(|node| node.has_tag_name("text"))
+        .flat_map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("");
     assert!(
-        arrows.contains("&lt;abc&gt;"),
-        "literal <abc> must be entity-escaped in arrow label: {arrows}"
+        label_text.contains("<abc>"),
+        "literal <abc> must round-trip in label text: {label_text:?}"
     );
     assert!(
-        arrows.contains("&amp;"),
-        "literal & must be entity-escaped in arrow label: {arrows}"
+        label_text.contains('&'),
+        "literal & must round-trip in label text: {label_text:?}"
     );
     assert!(
-        arrows.contains("&lt;xyz&gt;"),
-        "literal <xyz> must be entity-escaped in arrow label: {arrows}"
+        label_text.contains("<xyz>"),
+        "literal <xyz> must round-trip in label text: {label_text:?}"
     );
 }
 
@@ -3056,13 +3461,12 @@ fn z_order_row_backgrounds_first_iter1() {
     // `@bgcolor0` ensures the `row-backgrounds` layer has content and therefore
     // is emitted (spec §「空レイヤーの省略」 omits empty layers).
     let svg = render_pipeline("@bgcolor0 #fde\nA _\nB _\n");
-    let row_bg_pos = svg
-        .find("class=\"row-backgrounds\"")
+    let doc = parse_svg(&svg);
+    let row_bg_pos = layer_document_index(&doc, "row-backgrounds")
         .expect("row-backgrounds group must be present for any signal chart");
     let other_groups = ["waveforms", "signal-labels"];
     for class in other_groups {
-        let other_pos = svg
-            .find(&format!("class=\"{class}\""))
+        let other_pos = layer_document_index(&doc, class)
             .unwrap_or_else(|| panic!("expected {class} group to be present in SVG: {svg}"));
         assert!(
             row_bg_pos < other_pos,
@@ -3074,11 +3478,10 @@ fn z_order_row_backgrounds_first_iter1() {
 #[test]
 fn z_order_arrows_before_overlays_iter1() {
     let svg = render_pipeline("A _@{a}_\n% 5 5 mark\n@-> (@{a}, @{a})\n");
-    let arrows_pos = svg
-        .find("class=\"arrows\"")
+    let doc = parse_svg(&svg);
+    let arrows_pos = layer_document_index(&doc, "arrows")
         .unwrap_or_else(|| panic!("arrows group must be present for @-> input: {svg}"));
-    let overlays_pos = svg
-        .find("class=\"overlays\"")
+    let overlays_pos = layer_document_index(&doc, "overlays")
         .unwrap_or_else(|| panic!("overlays group must be present for % input: {svg}"));
     assert!(
         arrows_pos < overlays_pos,
@@ -3089,8 +3492,9 @@ fn z_order_arrows_before_overlays_iter1() {
 #[test]
 fn empty_dontcares_group_omitted_iter1() {
     let svg = render_pipeline("A _~\n");
+    let doc = parse_svg(&svg);
     assert!(
-        !svg.contains("class=\"dontcares\""),
+        !has_layer(&doc, "dontcares"),
         "empty dontcares group must be omitted: {svg}"
     );
 }
@@ -3098,8 +3502,9 @@ fn empty_dontcares_group_omitted_iter1() {
 #[test]
 fn empty_arrows_group_omitted_iter1() {
     let svg = render_pipeline("A _~\n");
+    let doc = parse_svg(&svg);
     assert!(
-        !svg.contains("class=\"arrows\""),
+        !has_layer(&doc, "arrows"),
         "empty arrows group must be omitted: {svg}"
     );
 }
@@ -3107,8 +3512,10 @@ fn empty_arrows_group_omitted_iter1() {
 #[test]
 fn first_hatch_pattern_id_starts_at_one_iter1() {
     let svg = render_pipeline("A _?_\n");
+    let doc = parse_svg(&svg);
     assert!(
-        svg.contains("dontcare-hatch-1"),
+        layer_has_attribute_value(&doc, "row-backgrounds", "fill", "url(#dontcare-hatch-1)")
+            || svg.contains("dontcare-hatch-1"),
         "first hatch id must be 1: {svg}"
     );
 }
@@ -3116,7 +3523,8 @@ fn first_hatch_pattern_id_starts_at_one_iter1() {
 #[test]
 fn duplicate_dontcare_color_shares_single_pattern_iter1() {
     let svg = render_pipeline("@dontcare_color red\nA _?_\nB _?_\nC _?_\nD _?_\n");
-    let pattern_count = svg.matches("<pattern").count();
+    let doc = parse_svg(&svg);
+    let pattern_count = count_elements_with_tag(&doc, "pattern");
     assert_eq!(
         pattern_count, 1,
         "same color must reuse pattern; got {pattern_count} patterns"
@@ -3135,7 +3543,8 @@ fn iter2_bus_with_seven_text_fragments_renders_text_elements() {
     // pipeline must produce at least one `<text>` element per labelled bus
     // segment without panicking.
     let svg = render_pipeline("Sig =A=B=C=D=E=F=G===\n");
-    let text_count = extract_layer(&svg, "waveforms").matches("<text").count();
+    let doc = parse_svg(&svg);
+    let text_count = layer_element_count(&doc, "waveforms", "text");
     assert!(
         text_count >= 1,
         "expected at least one bus-label <text>; got {text_count} svg={svg}"
@@ -3190,9 +3599,13 @@ fn iter2_bus_label_around_buscross_produces_multiple_text_elements() {
     // `=a=Xab==` puts label `a` in the left bus run and `ab` in the right
     // bus run separated by a BusCross transition. Both labels must reach SVG.
     let svg = render_pipeline("Sig =a=Xab==\n");
-    assert!(svg.contains(">a<"), "left-bus label `a` must appear: {svg}");
+    let doc = parse_svg(&svg);
     assert!(
-        svg.contains(">ab<"),
+        layer_any_text_equals(&doc, "waveforms", "a"),
+        "left-bus label `a` must appear: {svg}"
+    );
+    assert!(
+        layer_any_text_equals(&doc, "waveforms", "ab"),
         "right-bus label `ab` must appear: {svg}"
     );
 }
@@ -3200,9 +3613,11 @@ fn iter2_bus_label_around_buscross_produces_multiple_text_elements() {
 #[test]
 fn iter2_busxross_chain_text_attribution_renders_all_labels() {
     let svg = render_pipeline("Sig ===XaXb=\n");
+    let doc = parse_svg(&svg);
     for letter in ['a', 'b'] {
+        let expected = letter.to_string();
         assert!(
-            svg.contains(&format!(">{letter}<")),
+            layer_any_text_equals(&doc, "waveforms", &expected),
             "label {letter} must appear in SVG: {svg}"
         );
     }
@@ -3211,42 +3626,65 @@ fn iter2_busxross_chain_text_attribution_renders_all_labels() {
 #[test]
 fn iter2_quoted_literal_with_escaped_quote_is_unescaped_in_label() {
     let svg = render_pipeline("Sig =\"A\\\"_~B\"==\n");
-    let waveforms = extract_layer(&svg, "waveforms");
+    // After roxmltree parses the XML, entity-escaped `&quot;` decodes back to
+    // a literal `"`, so the surviving text node carries the raw original.
+    let doc = parse_svg(&svg);
+    let label_text: String = layer_descendants(&doc, "waveforms")
+        .filter(|node| node.has_tag_name("text"))
+        .flat_map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("");
     assert!(
-        waveforms.contains("A&quot;_~B") || waveforms.contains("A\"_~B"),
-        "literal quote inside label must be present (entity-escaped is OK): {waveforms}"
+        label_text.contains("A\"_~B"),
+        "literal quote inside label must round-trip: {label_text:?}"
     );
     assert!(
-        waveforms.contains('_') && waveforms.contains('~'),
-        "_ and ~ inside quoted literal must be retained as text characters: {waveforms}"
+        label_text.contains('_') && label_text.contains('~'),
+        "_ and ~ inside quoted literal must be retained: {label_text:?}"
     );
 }
 
 #[test]
 fn iter2_quoted_literal_with_backslash_yields_single_backslash() {
     let svg = render_pipeline("Sig =\"path\\\\to\\\\dir\"==\n");
-    let waveforms = extract_layer(&svg, "waveforms");
-    let backslashes = waveforms.matches('\\').count();
+    let doc = parse_svg(&svg);
+    let label_text: String = layer_descendants(&doc, "waveforms")
+        .filter(|node| node.has_tag_name("text"))
+        .flat_map(|node| {
+            node.descendants()
+                .filter(|child| child.is_text())
+                .filter_map(|child| child.text())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let backslashes = label_text.matches('\\').count();
     assert!(
         backslashes >= 2,
-        "expected at least 2 unescaped backslashes in label: waveforms={waveforms}"
+        "expected at least 2 unescaped backslashes in label: {label_text:?}"
     );
     assert!(
-        !waveforms.contains("\\\\\\\\"),
-        "backslash must not stay double-escaped: waveforms={waveforms}"
+        !label_text.contains("\\\\\\\\"),
+        "backslash must not stay double-escaped: {label_text:?}"
     );
 }
 
 #[test]
 fn iter2_long_label_wider_than_segment_still_emits_text() {
     let svg = render_pipeline("Sig =VeryLongLabelName==\n");
-    let count = extract_layer(&svg, "waveforms").matches("<text").count();
+    let doc = parse_svg(&svg);
+    let count = layer_element_count(&doc, "waveforms", "text");
     assert!(
         count >= 1,
         "long label that overflows the bus run width must still emit a <text>: {svg}"
     );
     assert!(
-        svg.contains("VeryLongLabelName"),
+        layer_any_text_contains(&doc, "waveforms", "VeryLongLabelName"),
         "long label text must reach SVG verbatim: {svg}"
     );
 }
@@ -3254,9 +3692,11 @@ fn iter2_long_label_wider_than_segment_still_emits_text() {
 #[test]
 fn iter2_consecutive_buscross_with_labels_renders_multiple_labels() {
     let svg = render_pipeline("Sig =Xa=XbXc=\n");
+    let doc = parse_svg(&svg);
     for letter in ['a', 'b', 'c'] {
+        let expected = letter.to_string();
         assert!(
-            svg.contains(&format!(">{letter}<")),
+            layer_any_text_equals(&doc, "waveforms", &expected),
             "label {letter} must reach SVG: {svg}"
         );
     }
@@ -3265,45 +3705,47 @@ fn iter2_consecutive_buscross_with_labels_renders_multiple_labels() {
 #[test]
 fn iter2_bus_label_with_xml_dangerous_chars_is_entity_escaped() {
     let svg = render_pipeline("Sig =\"<&>\"==\n");
-    let waveforms = extract_layer(&svg, "waveforms");
+    let doc = parse_svg(&svg);
+    // The SVG must parse — that already proves dangerous chars are escaped at
+    // the byte level. After parsing, the entity-encoded characters decode back
+    // to the raw chars in the text node.
     assert!(
-        waveforms.contains("&lt;") && waveforms.contains("&gt;") && waveforms.contains("&amp;"),
-        "XML-dangerous chars in label must be entity-escaped: waveforms={waveforms}"
-    );
-    assert!(
-        !waveforms.contains(">&<"),
-        "raw `&` inside text content is forbidden: waveforms={waveforms}"
+        layer_any_text_equals(&doc, "waveforms", "<&>"),
+        "label `<&>` must round-trip as raw characters: {svg}"
     );
 }
 
 #[test]
 fn iter2_bus_label_with_cdata_terminator_uses_entity_escape_not_cdata() {
     let svg = render_pipeline("Sig =\"a]]>b\"==\n");
-    let waveforms = extract_layer(&svg, "waveforms");
+    let doc = parse_svg(&svg);
+    // The byte-level check (no `<![CDATA[`) confirms the renderer chose
+    // entity escaping. The DOM-level check confirms the label round-trips.
     assert!(
-        !waveforms.contains("<![CDATA["),
-        "CDATA must not be used for waveform text labels: waveforms={waveforms}"
+        !svg.contains("<![CDATA["),
+        "CDATA must not be used for waveform text labels: {svg}"
     );
     assert!(
-        waveforms.contains("&gt;"),
-        "literal `>` must be entity-escaped: waveforms={waveforms}"
+        layer_any_text_equals(&doc, "waveforms", "a]]>b"),
+        "label `a]]>b` must round-trip as raw characters: {svg}"
     );
 }
 
 #[test]
 fn iter2_empty_string_label_does_not_emit_empty_text_element() {
     let svg = render_pipeline("Sig =\"\"==\n");
-    let waveforms = extract_layer(&svg, "waveforms");
+    let doc = parse_svg(&svg);
     assert!(
-        !waveforms.contains("<text"),
-        "empty `<text></text>` element must not be emitted: waveforms={waveforms}"
+        layer_element_count(&doc, "waveforms", "text") == 0,
+        "empty `<text></text>` element must not be emitted: {svg}"
     );
 }
 
 #[test]
 fn iter2_whitespace_only_label_is_emitted_as_text_element() {
     let svg = render_pipeline("Sig =\" \"==\n");
-    let count = extract_layer(&svg, "waveforms").matches("<text").count();
+    let doc = parse_svg(&svg);
+    let count = layer_element_count(&doc, "waveforms", "text");
     assert!(
         count >= 1,
         "whitespace-only label must still produce a <text>: {svg}"
@@ -3315,12 +3757,19 @@ fn iter2_skip_row_does_not_break_bgcolor_parity() {
     // Spec: `@skip(N)` consumes index slots so the next signal row's parity
     // continues from where it would have been without the skip.
     let svg = render_pipeline("@bgcolor0 #aaaaaa\n@bgcolor1 #bbbbbb\nA _\n@skip(1)\nB _\n");
-    let row_bg = extract_layer(&svg, "row-backgrounds");
-    let count_a = row_bg.matches("#aaaaaa").count();
-    let count_b = row_bg.matches("#bbbbbb").count();
+    let doc = parse_svg(&svg);
+    let fills = layer_collect_attribute(&doc, "row-backgrounds", "rect", "fill");
+    let count_a = fills
+        .iter()
+        .filter(|value| value.as_str() == "#aaaaaa")
+        .count();
+    let count_b = fills
+        .iter()
+        .filter(|value| value.as_str() == "#bbbbbb")
+        .count();
     assert!(
         count_a >= 1 && count_b >= 1,
-        "both bg colors must appear at least once: row_bg={row_bg}"
+        "both bg colors must appear at least once: fills={fills:?}"
     );
 }
 
@@ -3329,85 +3778,90 @@ fn iter2_title_rows_are_excluded_from_bgcolor_parity() {
     let svg = render_pipeline(
         "@bgcolor0 #aaaaaa\n@bgcolor1 #bbbbbb\n@title \"T1\"\n@title \"T2\"\nA _\nB _\n",
     );
-    let row_bg = extract_layer(&svg, "row-backgrounds");
+    let doc = parse_svg(&svg);
+    let fills = layer_collect_attribute(&doc, "row-backgrounds", "rect", "fill");
     assert!(
-        row_bg.contains("#aaaaaa") && row_bg.contains("#bbbbbb"),
-        "both parity colors must appear when there are 2 signal rows: row_bg={row_bg}"
+        fills.iter().any(|value| value == "#aaaaaa")
+            && fills.iter().any(|value| value == "#bbbbbb"),
+        "both parity colors must appear when there are 2 signal rows: fills={fills:?}"
     );
 }
 
 #[test]
 fn iter2_only_bgcolor0_omits_odd_row_rect() {
     let svg = render_pipeline("@bgcolor0 #eeeeee\nA _\nB _\nC _\n");
-    let row_bg = extract_layer(&svg, "row-backgrounds");
-    let count_eee = row_bg.matches("#eeeeee").count();
+    let doc = parse_svg(&svg);
+    let fills = layer_collect_attribute(&doc, "row-backgrounds", "rect", "fill");
+    let count_eee = fills
+        .iter()
+        .filter(|value| value.as_str() == "#eeeeee")
+        .count();
     assert_eq!(
         count_eee, 2,
-        "two even rows (A, C) must each get the rect; got {count_eee}: row_bg={row_bg}"
+        "two even rows (A, C) must each get the rect; got {count_eee}: fills={fills:?}"
     );
 }
 
 #[test]
 fn iter2_only_bgcolor1_omits_even_row_rect() {
     let svg = render_pipeline("@bgcolor1 #eeeeee\nA _\nB _\nC _\n");
-    let row_bg = extract_layer(&svg, "row-backgrounds");
-    let count_eee = row_bg.matches("#eeeeee").count();
+    let doc = parse_svg(&svg);
+    let fills = layer_collect_attribute(&doc, "row-backgrounds", "rect", "fill");
+    let count_eee = fills
+        .iter()
+        .filter(|value| value.as_str() == "#eeeeee")
+        .count();
     assert_eq!(
         count_eee, 1,
-        "exactly one odd row (B) must get the rect; got {count_eee}: row_bg={row_bg}"
+        "exactly one odd row (B) must get the rect; got {count_eee}: fills={fills:?}"
     );
 }
 
 #[test]
 fn iter2_all_bg_none_emits_no_row_background_rect() {
     let svg = render_pipeline("@bgcolor0 none\n@bgcolor1 none\nA _\nB _\nC _\n");
-    let row_bg = extract_layer(&svg, "row-backgrounds");
-    let rect_count = row_bg.matches("<rect").count();
+    let doc = parse_svg(&svg);
+    let rect_count = layer_element_count(&doc, "row-backgrounds", "rect");
     assert_eq!(
         rect_count, 0,
-        "all-none must produce zero <rect> elements; got {rect_count}: row_bg={row_bg}"
+        "all-none must produce zero <rect> elements; got {rect_count}: {svg}"
     );
 }
 
 #[test]
 fn iter2_per_row_bg_overrides_bgcolor_parity() {
     let svg = render_pipeline("@bgcolor0 #eeeeee\n@bgcolor1 #dddddd\n@bg yellow\nA _\nB _\n");
-    let row_bg = extract_layer(&svg, "row-backgrounds");
+    let doc = parse_svg(&svg);
+    let fills = layer_collect_attribute(&doc, "row-backgrounds", "rect", "fill");
     assert!(
-        row_bg.contains("yellow") || row_bg.contains("#ffff00"),
-        "per-row @bg must take precedence on the affected row: row_bg={row_bg}"
+        fills
+            .iter()
+            .any(|value| value == "yellow" || value == "#ffff00"),
+        "per-row @bg must take precedence on the affected row: fills={fills:?}"
     );
     assert!(
-        row_bg.contains("#dddddd"),
-        "non-overridden parity row must keep its parity color: row_bg={row_bg}"
+        fills.iter().any(|value| value == "#dddddd"),
+        "non-overridden parity row must keep its parity color: fills={fills:?}"
     );
 }
 
 #[test]
 fn iter2_arrow_spans_two_signal_rows_with_distinct_y_coordinates() {
     let svg = render_pipeline("A _@{a}~\nB _~@{b}\n@-> (@{a}, @{b})\n");
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
+    let y1_values = layer_collect_attribute(&doc, "arrows", "line", "y1");
+    let y2_values = layer_collect_attribute(&doc, "arrows", "line", "y2");
     assert!(
-        arrows.contains("y1=\""),
-        "arrow line must have a y1 attribute: arrows={arrows}"
+        !y1_values.is_empty(),
+        "arrow line must have a y1 attribute: {svg}"
     );
     assert!(
-        arrows.contains("y2=\""),
-        "arrow line must have a y2 attribute: arrows={arrows}"
+        !y2_values.is_empty(),
+        "arrow line must have a y2 attribute: {svg}"
     );
-    let y1 = arrows
-        .split("y1=\"")
-        .nth(1)
-        .and_then(|tail| tail.split('"').next())
-        .expect("y1 value must be parseable");
-    let y2 = arrows
-        .split("y2=\"")
-        .nth(1)
-        .and_then(|tail| tail.split('"').next())
-        .expect("y2 value must be parseable");
     assert_ne!(
-        y1, y2,
-        "cross-row arrow must have distinct y1 and y2 coordinates: arrows={arrows}"
+        y1_values[0], y2_values[0],
+        "cross-row arrow must have distinct y1 and y2 coordinates: y1={y1_values:?} y2={y2_values:?}"
     );
 }
 
@@ -3415,18 +3869,19 @@ fn iter2_arrow_spans_two_signal_rows_with_distinct_y_coordinates() {
 fn iter2_two_arrows_on_same_anchor_pair_render_in_document_order() {
     let svg =
         render_pipeline("A _@{a}~\nB _~@{b}\n@-> (@{a}, @{b})\n@-> (@{a}, @{b}, color=red)\n");
-    let arrows = extract_layer(&svg, "arrows");
-    let line_count = arrows.matches("<line").count();
-    let path_count = arrows.matches("<path").count();
+    let doc = parse_svg(&svg);
+    let line_count = layer_element_count(&doc, "arrows", "line");
+    let path_count = layer_element_count(&doc, "arrows", "path");
     assert!(
         line_count + path_count >= 2,
-        "two arrows must produce at least 2 line/path strokes: arrows={arrows}"
+        "two arrows must produce at least 2 line/path strokes: {svg}"
     );
     // `Color::to_css_string` canonicalises named colours to `#rrggbb`, so the
     // SVG either retains the original name `red` or emits the hex form.
     assert!(
-        arrows.contains("red") || arrows.contains("#ff0000"),
-        "second arrow with color=red must surface as a red stroke (name or hex): arrows={arrows}"
+        layer_has_attribute_value(&doc, "arrows", "stroke", "red")
+            || layer_has_attribute_value(&doc, "arrows", "stroke", "#ff0000"),
+        "second arrow with color=red must surface as a red stroke (name or hex): {svg}"
     );
 }
 
@@ -3435,40 +3890,42 @@ fn iter2_arrow_head_both_with_zero_width_dashed_emits_two_polygons() {
     let svg = render_pipeline(
         "A _@{a}~\nB _~@{b}\n@-> (@{a}, @{b}, head=both, width=0px, style=dashed)\n",
     );
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
     // Arrow heads are rendered as <path>, not <polygon> (spec §「矢印頭」: "path で実装").
-    let head_count = arrows.matches("<path").count();
+    let head_count = layer_element_count(&doc, "arrows", "path");
     assert_eq!(
         head_count, 2,
-        "head=both must emit 2 arrow heads as <path> elements: arrows={arrows}"
+        "head=both must emit 2 arrow heads as <path> elements: {svg}"
+    );
+    let has_dash =
+        layer_descendants(&doc, "arrows").any(|node| node.attribute("stroke-dasharray").is_some());
+    assert!(
+        has_dash,
+        "dashed style must produce stroke-dasharray attribute: {svg}"
     );
     assert!(
-        arrows.contains("stroke-dasharray"),
-        "dashed style must produce stroke-dasharray attribute: arrows={arrows}"
-    );
-    assert!(
-        arrows.contains("stroke-width=\"0\""),
-        "width=0px must serialise as stroke-width=\"0\": arrows={arrows}"
+        layer_has_attribute_value(&doc, "arrows", "stroke-width", "0"),
+        "width=0px must serialise as stroke-width=\"0\": {svg}"
     );
 }
 
 #[test]
 fn iter2_arrow_label_text_appears_for_single_letter_label() {
     let svg = render_pipeline("A _@{a}~~~~~~@{b}~\nB _\n@-> (@{a}, @{b}) L\n");
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
     assert!(
-        arrows.contains(">L<"),
-        "arrow label text `L` must appear: arrows={arrows}"
+        layer_any_text_equals(&doc, "arrows", "L"),
+        "arrow label text `L` must appear: {svg}"
     );
 }
 
 #[test]
 fn iter2_arrow_label_with_spaces_preserves_text() {
     let svg = render_pipeline("A _@{a}~\nB _~@{b}\n@-> (@{a}, @{b}) \"long label here\"\n");
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
     assert!(
-        arrows.contains("long label here"),
-        "arrow label with spaces must survive verbatim: arrows={arrows}"
+        layer_any_text_contains(&doc, "arrows", "long label here"),
+        "arrow label with spaces must survive verbatim: {svg}"
     );
 }
 
@@ -3477,14 +3934,11 @@ fn iter2_arrows_layer_appears_after_edge_marks_layer() {
     // The `@clock(pos)` marker layer must be drawn before `arrows` so arrows
     // appear in front of clock indicators.
     let svg = render_pipeline("@clock(pos) clk _\nA _@{a}~\nB _~@{b}\n@-> (@{a}, @{b})\n");
-    let edge_marks_pos = svg.find("class=\"edge-marks\"");
-    let arrows_pos = svg.find("class=\"arrows\"");
-    let edge_marks = edge_marks_pos.unwrap_or_else(|| {
-        panic!("edge-marks layer must be present in SVG: svg={svg}");
-    });
-    let arrows = arrows_pos.unwrap_or_else(|| {
-        panic!("arrows layer must be present in SVG: svg={svg}");
-    });
+    let doc = parse_svg(&svg);
+    let edge_marks = layer_document_index(&doc, "edge-marks")
+        .unwrap_or_else(|| panic!("edge-marks layer must be present in SVG: svg={svg}"));
+    let arrows = layer_document_index(&doc, "arrows")
+        .unwrap_or_else(|| panic!("arrows layer must be present in SVG: svg={svg}"));
     assert!(
         edge_marks < arrows,
         "edge marks must precede arrows in document order; got edge_marks={edge_marks} arrows={arrows}"
@@ -3502,9 +3956,9 @@ fn iter2_one_hundred_arrows_on_same_row_all_render() {
         source.push_str(&format!("@-> (@{}, @{})\n", index, index + 100));
     }
     let svg = render_pipeline(&source);
-    let arrows = extract_layer(&svg, "arrows");
-    let line_count = arrows.matches("<line").count();
-    let path_count = arrows.matches("<path").count();
+    let doc = parse_svg(&svg);
+    let line_count = layer_element_count(&doc, "arrows", "line");
+    let path_count = layer_element_count(&doc, "arrows", "path");
     assert!(
         line_count + path_count >= 100,
         "expected at least 100 arrow strokes; got line={line_count} path={path_count}"
@@ -3525,10 +3979,12 @@ fn iter2_arrow_head_start_rejected_or_yields_no_end_polygon() {
 #[test]
 fn iter2_arrow_style_solid_omits_stroke_dasharray() {
     let svg = render_pipeline("A _@{a}~\nB _~@{b}\n@-> (@{a}, @{b}, style=solid)\n");
-    let arrows = extract_layer(&svg, "arrows");
+    let doc = parse_svg(&svg);
+    let has_dash =
+        layer_descendants(&doc, "arrows").any(|node| node.attribute("stroke-dasharray").is_some());
     assert!(
-        !arrows.contains("stroke-dasharray"),
-        "solid arrow must not emit stroke-dasharray: arrows={arrows}"
+        !has_dash,
+        "solid arrow must not emit stroke-dasharray: {svg}"
     );
 }
 
@@ -3599,7 +4055,11 @@ fn iter3_zero_width_space_in_label_does_not_panic_layout() {
         return;
     }
     let svg = render_pipeline("A\u{200B}B _~\n");
-    assert!(svg.contains("<svg"), "SVG document must be produced");
+    assert_eq!(
+        parse_svg(&svg).root_element().tag_name().name(),
+        "svg",
+        "SVG document must be produced: {svg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3640,14 +4100,14 @@ fn iter3_five_distinct_dontcare_colors_yield_five_patterns() {
 #[test]
 fn iter3_polyline_does_not_carry_id_attribute() {
     let svg = render_pipeline("A _~_~\n");
-    let polyline_section = svg.match_indices("<polyline").next();
-    if let Some((start, _)) = polyline_section {
-        let snippet: String = svg[start..].chars().take(400).collect();
-        assert!(
-            !snippet.contains(" id=\""),
-            "<polyline> must not carry an id attribute; snippet={snippet}"
-        );
-    }
+    let doc = parse_svg(&svg);
+    let any_polyline_with_id = doc.root_element().descendants().any(|node| {
+        node.is_element() && node.has_tag_name("polyline") && node.attribute("id").is_some()
+    });
+    assert!(
+        !any_polyline_with_id,
+        "<polyline> must not carry an id attribute: {svg}"
+    );
 }
 
 #[test]
@@ -3689,7 +4149,14 @@ fn iter3_hundred_arrows_share_single_arrows_layer() {
         source.push_str(&format!("@-> (@{}, @{})\n", index, index + 100));
     }
     let svg = render_pipeline(&source);
-    let layer_count = svg.matches("class=\"arrows\"").count();
+    let doc = parse_svg(&svg);
+    let layer_count = doc
+        .root_element()
+        .descendants()
+        .filter(|node| {
+            node.is_element() && node.has_tag_name("g") && node.attribute("class") == Some("arrows")
+        })
+        .count();
     assert_eq!(
         layer_count, 1,
         "<g class=\"arrows\"> must appear exactly once even for many arrows; got {layer_count}"
@@ -3701,17 +4168,13 @@ fn iter3_defs_child_ids_are_unique() {
     let svg = render_pipeline(
         "@dontcare_color #c00\nA _?_\n@dontcare_color #06c\nB _?_\n@clock(pos) clk _~_~\n",
     );
-    let mut ids: Vec<&str> = Vec::new();
-    let mut cursor = 0;
-    while let Some(start) = svg[cursor..].find(" id=\"") {
-        let value_start = cursor + start + 5;
-        let value_end = value_start
-            + svg[value_start..]
-                .find('"')
-                .expect("id attribute must close");
-        ids.push(&svg[value_start..value_end]);
-        cursor = value_end + 1;
-    }
+    let doc = parse_svg(&svg);
+    let ids: Vec<String> = doc
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .filter_map(|node| node.attribute("id").map(str::to_owned))
+        .collect();
     let mut sorted = ids.clone();
     sorted.sort_unstable();
     let original_len = sorted.len();
@@ -3759,19 +4222,13 @@ const ITER3_ALLOWED_CLASS_TOKENS: &[&str] = &[
     "label",
 ];
 
-fn collect_class_attribute_values(svg: &str) -> Vec<&str> {
-    let mut values = Vec::new();
-    let mut cursor = 0;
-    while let Some(start) = svg[cursor..].find(" class=\"") {
-        let value_start = cursor + start + 8;
-        let value_end = value_start
-            + svg[value_start..]
-                .find('"')
-                .expect("class attribute must close");
-        values.push(&svg[value_start..value_end]);
-        cursor = value_end + 1;
-    }
-    values
+fn collect_class_attribute_values(svg: &str) -> Vec<String> {
+    parse_svg(svg)
+        .root_element()
+        .descendants()
+        .filter(|node| node.is_element())
+        .filter_map(|node| node.attribute("class").map(str::to_owned))
+        .collect()
 }
 
 #[test]
@@ -3858,14 +4315,16 @@ fn ruler_default_chart_emits_rulers_layer() {
     // Default `@ruler on` → signal rows contribute → `<g class="rulers">`
     // must be present.
     let svg = render_pipeline("A _~_~\n");
-    assert!(svg.contains("class=\"rulers\""));
+    let doc = parse_svg(&svg);
+    assert!(has_layer(&doc, "rulers"));
 }
 
 #[test]
 fn ruler_all_off_emits_no_rulers_layer() {
     // `@ruler off` only — no row contributes.
     let svg = render_pipeline("@ruler off\nA _~\nB _~\n");
-    assert!(!svg.contains("class=\"rulers\""));
+    let doc = parse_svg(&svg);
+    assert!(!has_layer(&doc, "rulers"));
 }
 
 #[test]
@@ -3873,52 +4332,57 @@ fn ruler_on_immediately_off_emits_no_rulers_layer() {
     // `@ruler on` immediately followed by `@ruler off` before any row
     // commits → all rows commit while off → no contributions.
     let svg = render_pipeline("@ruler on\n@ruler off\nA _~\nB _~\n");
-    assert!(!svg.contains("class=\"rulers\""));
+    let doc = parse_svg(&svg);
+    assert!(!has_layer(&doc, "rulers"));
 }
 
 #[test]
 fn ruler_on_emits_rulers_layer_with_lines() {
     // `@step 10`, `@ruler on`, `A _~_~_~` (units = 6) → 7 lines at x = 0..60.
     let svg = render_pipeline("@step 10\n@ruler on\nA _~_~_~\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert!(!layer.is_empty(), "rulers layer must be present");
+    let doc = parse_svg(&svg);
+    assert!(has_layer(&doc, "rulers"), "rulers layer must be present");
     // 7 <line> elements expected.
-    assert_eq!(layer.matches("<line").count(), 7, "layer: {layer}");
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 7, "{svg}");
     // Each line has stroke="#a0a0a0" (default), stroke-width="0.5",
     // stroke-dasharray="3 5".
-    assert!(layer.contains("stroke=\"#a0a0a0\""));
-    assert!(layer.contains("stroke-width=\"0.5\""));
-    assert!(layer.contains("stroke-dasharray=\"3 5\""));
+    assert!(layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#a0a0a0"
+    ));
+    assert!(layer_has_attribute_value(
+        &doc,
+        "rulers",
+        "stroke-width",
+        "0.5"
+    ));
+    assert!(layer_has_attribute_value(
+        &doc,
+        "rulers",
+        "stroke-dasharray",
+        "3 5"
+    ));
 }
 
 #[test]
 fn ruler_lines_have_full_chart_inner_height() {
     // All ruler lines span the chart inner height (y1=0 to y2=Σ bbox height).
     let svg = render_pipeline("@step 10\n@ruler on\nA _~\nB _~\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert!(layer.contains("y1=\"0\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(&doc, "rulers", "y1", "0"));
     // y2 cannot be predicted exactly without the layout engine, but should
-    // be a positive number > 0. Check the literal `y1="0"` followed by the
-    // `y2` attribute that is not 0.
-    assert!(!layer.contains("y2=\"0\""));
+    // be a positive number > 0.
+    assert!(!layer_has_attribute_value(&doc, "rulers", "y2", "0"));
 }
 
 #[test]
 fn ruler_lines_emitted_in_ascending_x_order() {
     // For multiple ruler lines, x values appear in the SVG in ascending order.
     let svg = render_pipeline("@step 10\n@ruler on\nA _~_~\n");
-    let layer = extract_layer(&svg, "rulers");
-    // Find each `x1="N"` literal and verify the sequence is ascending.
-    let mut xs: Vec<f32> = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(found) = layer[cursor..].find("x1=\"") {
-        let start = cursor + found + 4;
-        let end = layer[start..].find('"').expect("close");
-        let raw = &layer[start..start + end];
-        let value: f32 = raw.parse().expect("x must parse");
-        xs.push(value);
-        cursor = start + end;
-    }
+    let doc = parse_svg(&svg);
+    let xs: Vec<f32> = layer_collect_attribute(&doc, "rulers", "line", "x1")
+        .into_iter()
+        .map(|value| value.parse::<f32>().expect("x must parse"))
+        .collect();
     let mut sorted = xs.clone();
     sorted.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
     assert_eq!(xs, sorted, "x1 values must be ascending: {xs:?}");
@@ -3929,8 +4393,8 @@ fn ruler_same_x_merged_to_single_line() {
     // Two rows contributing the same x positions → a single line per x.
     // A has units=4, B has units=4, both at @step 10 → x ∈ {0..40}, 5 lines.
     let svg = render_pipeline("@step 10\n@ruler on\n@ruler_color #aaa\nA _~_~\nB _~_~\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert_eq!(layer.matches("<line").count(), 5);
+    let doc = parse_svg(&svg);
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 5);
 }
 
 #[test]
@@ -3941,9 +4405,13 @@ fn ruler_last_wins_color_per_x() {
     let svg = render_pipeline(
         "@step 10\n@ruler on\n@ruler_color #aaa\nA _~_~\n@ruler_color #bbb\nB _~_~\n",
     );
-    let layer = extract_layer(&svg, "rulers");
-    assert!(layer.contains("stroke=\"#bbbbbb\""));
-    assert!(!layer.contains("stroke=\"#aaaaaa\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#bbbbbb"
+    ));
+    assert!(!layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#aaaaaa"
+    ));
 }
 
 #[test]
@@ -3953,13 +4421,17 @@ fn ruler_distinct_x_keeps_both_colors() {
     let svg = render_pipeline(
         "@ruler on\n@ruler_color #aaa\n@step 10\nA _~\n@ruler_color #bbb\n@step 25\nB _~\n",
     );
-    let layer = extract_layer(&svg, "rulers");
-    assert_eq!(layer.matches("<line").count(), 5);
+    let doc = parse_svg(&svg);
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 5);
     // Lines at A-only x positions (10, 20) must have #aaa (expanded form).
-    assert!(layer.contains("stroke=\"#aaaaaa\""));
+    assert!(layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#aaaaaa"
+    ));
     // Lines at B-only x positions (25, 50) and the merged x=0 must have
     // #bbb (expanded form).
-    assert!(layer.contains("stroke=\"#bbbbbb\""));
+    assert!(layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#bbbbbb"
+    ));
 }
 
 #[test]
@@ -3969,10 +4441,16 @@ fn ruler_three_rows_last_color_wins() {
     let svg = render_pipeline(
         "@step 10\n@ruler on\n@ruler_color #aaa\nA _~\n@ruler_color #bbb\nB _~\n@ruler_color #ccc\nC _~\n",
     );
-    let layer = extract_layer(&svg, "rulers");
-    assert!(layer.contains("stroke=\"#cccccc\""));
-    assert!(!layer.contains("stroke=\"#aaaaaa\""));
-    assert!(!layer.contains("stroke=\"#bbbbbb\""));
+    let doc = parse_svg(&svg);
+    assert!(layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#cccccc"
+    ));
+    assert!(!layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#aaaaaa"
+    ));
+    assert!(!layer_has_attribute_value(
+        &doc, "rulers", "stroke", "#bbbbbb"
+    ));
 }
 
 #[test]
@@ -3980,9 +4458,9 @@ fn ruler_off_after_on_preserves_earlier_contributions() {
     // Row A commits while on, row B while off. A's contribution must be
     // preserved in the rulers layer; B contributes nothing.
     let svg = render_pipeline("@step 10\n@ruler on\nA _~_~\n@ruler off\nB _~_~\n");
-    let layer = extract_layer(&svg, "rulers");
+    let doc = parse_svg(&svg);
     // A had units=4 → 5 lines at x = 0..40.
-    assert_eq!(layer.matches("<line").count(), 5);
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 5);
 }
 
 #[test]
@@ -3991,8 +4469,8 @@ fn ruler_toggle_independent_contributions_persist() {
     // A and C contribute the same x ∈ {0, 10, 20}; B contributes nothing.
     // Merged set has 3 lines, all with C's color (last-wins).
     let svg = render_pipeline("@step 10\n@ruler on\nA _~\n@ruler off\nB _~\n@ruler on\nC _~\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert_eq!(layer.matches("<line").count(), 3);
+    let doc = parse_svg(&svg);
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 3);
 }
 
 #[test]
@@ -4000,30 +4478,26 @@ fn ruler_step_change_keeps_earlier_positions() {
     // A at @step 10 (x ∈ {0..40}, 5 lines), B at @step 25 (x ∈ {0..100}, 5
     // lines). Merged: {0, 10, 20, 25, 30, 40, 50, 75, 100} = 9 lines.
     let svg = render_pipeline("@step 10\n@ruler on\nA _~_~\n@step 25\nB _~_~\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert_eq!(layer.matches("<line").count(), 9);
+    let doc = parse_svg(&svg);
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 9);
 }
 
 #[test]
 fn ruler_skip_row_emits_contributions() {
     // @skip(2) alone: units=2 → 3 lines at x = 0, 10, 20.
     let svg = render_pipeline("@step 10\n@ruler on\n@skip(2)\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert_eq!(layer.matches("<line").count(), 3);
+    let doc = parse_svg(&svg);
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 3);
 }
 
 #[test]
 fn ruler_layer_appears_between_backgrounds_and_highlights() {
     // Layer order: row-backgrounds → rulers → highlights.
     let svg = render_pipeline("@bgcolor0 #eee\n@ruler on\nA _~_~[mark]_\n");
-    let backgrounds_pos = svg.find("class=\"row-backgrounds\"");
-    let rulers_pos = svg.find("class=\"rulers\"");
-    let highlights_pos = svg.find("class=\"highlights\"");
-    let (background, ruler, highlight) = (
-        backgrounds_pos.expect("backgrounds"),
-        rulers_pos.expect("rulers"),
-        highlights_pos.expect("highlights"),
-    );
+    let doc = parse_svg(&svg);
+    let background = layer_document_index(&doc, "row-backgrounds").expect("backgrounds");
+    let ruler = layer_document_index(&doc, "rulers").expect("rulers");
+    let highlight = layer_document_index(&doc, "highlights").expect("highlights");
     assert!(
         background < ruler && ruler < highlight,
         "expected row-backgrounds < rulers < highlights; got {background} < {ruler} < {highlight}"
@@ -4035,9 +4509,10 @@ fn ruler_layer_appears_before_waveforms_and_guides() {
     // Layer order: rulers must appear before waveforms / edge-marks /
     // guides / arrows.
     let svg = render_pipeline("@ruler on\nA _~|_\n");
-    let rulers_pos = svg.find("class=\"rulers\"").expect("rulers");
-    let waveforms_pos = svg.find("class=\"waveforms\"").expect("waveforms");
-    let guides_pos = svg.find("class=\"guides\"").expect("guides");
+    let doc = parse_svg(&svg);
+    let rulers_pos = layer_document_index(&doc, "rulers").expect("rulers");
+    let waveforms_pos = layer_document_index(&doc, "waveforms").expect("waveforms");
+    let guides_pos = layer_document_index(&doc, "guides").expect("guides");
     assert!(
         rulers_pos < waveforms_pos,
         "rulers must precede waveforms ({rulers_pos} < {waveforms_pos})"
@@ -4053,7 +4528,7 @@ fn ruler_single_contribution_keeps_layer() {
     // 1-contribution case: signal row with units=0 (empty body) at @step 10
     // and @ruler on → 1 line at x=0. Empty-layer suppression must NOT fire.
     let svg = render_pipeline("@step 10\n@ruler on\nA\n");
-    let layer = extract_layer(&svg, "rulers");
-    assert!(!layer.is_empty(), "rulers layer must be present");
-    assert_eq!(layer.matches("<line").count(), 1);
+    let doc = parse_svg(&svg);
+    assert!(has_layer(&doc, "rulers"), "rulers layer must be present");
+    assert_eq!(layer_element_count(&doc, "rulers", "line"), 1);
 }
