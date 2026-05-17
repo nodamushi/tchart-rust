@@ -8,16 +8,18 @@ mod state;
 mod transition;
 
 use crate::geometry::Point;
-use crate::line::{EdgeMark, LevelRun, Line, LineContent, SignalRow, WaveformElement};
+use crate::line::{
+    EdgeMark, LevelRun, Line, LineContent, SignalLevel, SignalRow, WaveformElement,
+};
 use crate::style::{ChartStyle, GuideStyle, LayoutParams, SvgAttrList};
 use crate::svg::buf::{SvgBuf, WriteSvgOn};
 use crate::svg::geometry::WaveformBoxY;
 use crate::text::{UnsafeLineText, UserText};
 use crate::units::Px;
 
-use crate::svg::waveform::dontcare::BusEdge;
+use crate::svg::waveform::dontcare::{DcSingleKind, DontCarePolygon, DontCarePolygonArgs};
 pub(crate) use dontcare_pattern::{DontcareHatchPatternId, DontcareHatchPatternTable};
-use state::{BusPolygonArgs, RowState};
+use state::RowState;
 
 /// Per-row outputs collected by the waveform pass.
 ///
@@ -154,7 +156,8 @@ impl RowOutput {
         }
     }
 
-    /// Handle a `Level` run: track dontcare presence, then push to state.
+    /// Handle a `Level` run: build the DontCare backing polygon (when this
+    /// level is a `DontCareAlong*`) and push the level's polyline points.
     fn append_level(
         &mut self,
         run: &LevelRun,
@@ -164,16 +167,24 @@ impl RowOutput {
         context: &RowContext<'_>,
         state: &mut RowState,
     ) {
-        let pattern_id = if run.level().is_dontcare() {
-            Some(
-                self.dontcare_patterns
-                    .insert_color(context.row.style().signal().dontcare_color()),
-            )
-        } else {
-            None
-        };
-        let bus_args = context.calc_bus_polygon_args(elements, index);
-        state.push_level(run, width, pattern_id, &bus_args, &mut self.dontcare_rects);
+        let polygon = run.level().is_dontcare().then(|| {
+            let pattern_id = self
+                .dontcare_patterns
+                .insert_color(context.row.style().signal().dontcare_color());
+            let layout = context.row.layout_params();
+            let args = DontCarePolygonArgs::new(
+                elements,
+                index,
+                state.cursor(),
+                width,
+                layout.slant(),
+                layout.step(),
+                state.waveform_y(),
+                pattern_id,
+            );
+            context.build_dontcare_polygon(run, args)
+        });
+        state.push_level(run, width, polygon, &mut self.dontcare_rects);
     }
 
     /// Emit a `<text>` element for a waveform text label.
@@ -262,17 +273,23 @@ struct RowContext<'a> {
 }
 
 impl<'a> RowContext<'a> {
-    /// Compute the [`BusPolygonArgs`] for the `DontCareAlongBus` level at `index`.
+    /// Build the DontCare backing polygon for a DC level at `index`.
     ///
-    /// Uses this row's own layout parameter snapshot so that per-row @step/@slant
-    /// changes produce correct polygon coordinates.
-    fn calc_bus_polygon_args(&self, elements: &[WaveformElement], index: usize) -> BusPolygonArgs {
-        let layout = self.row.layout_params();
-        BusPolygonArgs {
-            prev_edge: BusEdge::from_prev(elements, index),
-            next_edge: BusEdge::from_next(elements, index),
-            slant: layout.slant(),
-            step: layout.step(),
+    /// Uses this row's own layout parameter snapshot so per-row `@step`/
+    /// `@slant` changes produce correct polygon coordinates. The polygon's
+    /// shape depends on the DC variant (Low/High/HiZ/Bus) and the adjacent
+    /// transitions around `index`.
+    fn build_dontcare_polygon(
+        &self,
+        run: &LevelRun,
+        args: DontCarePolygonArgs<'_>,
+    ) -> DontCarePolygon {
+        if run.level() == SignalLevel::DontCareAlongBus {
+            DontCarePolygon::for_bus(args)
+        } else {
+            let kind = DcSingleKind::from_level(run.level())
+                .expect("non-bus DontCare run must be DC-Low/High/HiZ");
+            DontCarePolygon::for_single(kind, args)
         }
     }
 }
@@ -524,3 +541,4 @@ impl WriteSvgOn for HighlightRect<'_> {
         target.write_literal("/>");
     }
 }
+
