@@ -1,7 +1,5 @@
 //! Unit tests for `arrow`.
 
-use std::num::NonZeroU32;
-
 use super::{Arrow, ArrowEnd, ArrowHead, ArrowStyle, LineDashStyle};
 use crate::anchor::AnchorId;
 use crate::color::Color;
@@ -11,8 +9,8 @@ use crate::units::Px;
 
 #[test]
 fn arrow_constructs_with_anchor_endpoints() {
-    let from = ArrowEnd::Anchor(AnchorId::Indexed(NonZeroU32::new(1).expect("nz")));
-    let to = ArrowEnd::Anchor(AnchorId::Indexed(NonZeroU32::new(2).expect("nz")));
+    let from = ArrowEnd::Anchor(AnchorId::Indexed(1));
+    let to = ArrowEnd::Anchor(AnchorId::Indexed(2));
     let arrow = Arrow::new(
         from.clone(),
         to.clone(),

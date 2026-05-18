@@ -1062,9 +1062,8 @@ fn anchor_after_transition_via_parser() {
 /// Waveform: Level(Bus,5)[0], Anchor(@1)[1], Transition(BusCross)[2], Level(Bus,4)[3], Anchor(@2)[4]
 #[test]
 fn anchor_after_buscross_has_correct_x() {
-    use std::num::NonZeroU32;
-    let anchor_1 = AnchorId::Indexed(NonZeroU32::new(1).expect("nonzero"));
-    let anchor_2 = AnchorId::Indexed(NonZeroU32::new(2).expect("nonzero"));
+    let anchor_1 = AnchorId::Indexed(1);
+    let anchor_2 = AnchorId::Indexed(2);
     let mut document = make_buscross_anchor_document(anchor_1.clone(), anchor_2.clone());
     insert_inline_anchor(&mut document, anchor_1.clone(), 0, 1);
     insert_inline_anchor(&mut document, anchor_2.clone(), 0, 4);
@@ -1104,7 +1103,6 @@ fn make_buscross_anchor_document(anchor_1: AnchorId, anchor_2: AnchorId) -> Char
 /// so Bus(5) width = 5*10-2 = 48; x_@2 = 50 + 2 + 48 = 100.
 #[test]
 fn anchor_after_buscross_via_parser() {
-    use std::num::NonZeroU32;
     let source = "@step 10\n@slant 2\nBus =====@1X====@2\n";
     let mut document = crate::parser::parse(source).expect("parse");
     document.style.set_capwidth(Some(Px(0.0)));
@@ -1112,8 +1110,8 @@ fn anchor_after_buscross_via_parser() {
     let fonts = MockFonts::new(7.0);
     layout(&mut document, &fonts).expect("layout");
 
-    let anchor_1 = AnchorId::Indexed(NonZeroU32::new(1).expect("nonzero"));
-    let anchor_2 = AnchorId::Indexed(NonZeroU32::new(2).expect("nonzero"));
+    let anchor_1 = AnchorId::Indexed(1);
+    let anchor_2 = AnchorId::Indexed(2);
     let signal_origin_x = compute_signal_origin_x(&document);
 
     let x_1 = lookup_anchor_x(&document, &anchor_1);
@@ -1322,11 +1320,11 @@ fn per_row_step_with_anchor_position_reflects_local_step() {
     let one = document
         .annotations
         .anchors
-        .lookup_position(&AnchorId::Indexed(NonZeroU32::new(1).expect("nonzero")));
+        .lookup_position(&AnchorId::Indexed(1));
     let two = document
         .annotations
         .anchors
-        .lookup_position(&AnchorId::Indexed(NonZeroU32::new(2).expect("nonzero")));
+        .lookup_position(&AnchorId::Indexed(2));
     if let (Some(one), Some(two)) = (one, two) {
         let dx_one = one.x.to_f32();
         let dx_two = two.x.to_f32();
