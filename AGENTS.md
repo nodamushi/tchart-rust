@@ -94,6 +94,7 @@ These rules govern when files may be created or modified. Git commit timing is a
 
 # Git
 
+- **NEVER commit directly to `develop` or `main`.** All work commits go on a branch derived from `local`. Before staging any change, verify `git rev-parse --abbrev-ref HEAD` is NOT `develop` and NOT `main`. If you are on `develop` or `main`, switch to a branch derived from `local` first. `develop` and `main` are produced solely by the `branch-sync` skill flow.
 - Be sure to commit to Git before launching the rust-coder agent. Always commit, no matter what.
    - If your code isn't working, ignore the following command, and commit with message like "WIP: Explanation".
 - Commit at appropriate intervals with appropriate granularity.
