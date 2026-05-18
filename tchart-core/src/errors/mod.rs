@@ -214,13 +214,14 @@ pub(crate) enum ParseErrorKind {
     /// the anchor scanner ran out (typically end-of-line).
     #[error("`@{{` is not closed")]
     AnchorBraceNotClosed,
-    /// An anchor index (`@N`) parsed as digits but exceeded the `u32` cap.
+    /// An anchor index (`@N`) digit run failed to parse into `u32`. The only
+    /// reachable cause today is a digit run whose numeric value exceeds
+    /// `u32::MAX` (the scanner already filters to ASCII digits, so format
+    /// errors cannot occur). The variant name keeps a generic shape so future
+    /// scanner extensions can route additional `@N` parse failures through it.
     /// Payload: the offending digit run, verbatim.
     #[error("invalid anchor index: \"{0}\"")]
     AnchorIndexNotParseable(String),
-    /// An anchor index parsed but evaluated to `0`. Indices must be > 0.
-    #[error("anchor index must be > 0")]
-    AnchorIndexZero,
     /// `@highlight_style key=value ...` had an empty attribute name (e.g.
     /// `@highlight_style =value`).
     #[error("@highlight_style: attribute name is empty")]

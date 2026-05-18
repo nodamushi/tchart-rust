@@ -1,7 +1,6 @@
 //! `@{name}` / `@N` anchor scanner.
 
 use std::iter::Peekable;
-use std::num::NonZeroU32;
 use std::str::CharIndices;
 
 use crate::anchor::{AnchorId, AnchorName};
@@ -93,8 +92,6 @@ impl<'source, 'iter> AnchorScanner<'source, 'iter> {
         let value: u32 = raw.parse().map_err(|_| {
             self.make_error_with_kind(ParseErrorKind::AnchorIndexNotParseable(raw.to_owned()))
         })?;
-        let value = NonZeroU32::new(value)
-            .ok_or_else(|| self.make_error_with_kind(ParseErrorKind::AnchorIndexZero))?;
         Ok(AnchorId::Indexed(value))
     }
 

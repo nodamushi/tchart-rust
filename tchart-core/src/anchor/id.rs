@@ -1,7 +1,5 @@
 //! Anchor identifiers — `@{name}` / `@N`.
 
-use std::num::NonZeroU32;
-
 use crate::anchor::name::AnchorName;
 
 /// An anchor identifier.
@@ -12,6 +10,8 @@ use crate::anchor::name::AnchorName;
 pub(crate) enum AnchorId {
     /// `@{edge}` and similar named anchors.
     Named(AnchorName),
-    /// `@1`, `@2`, ... numeric anchors. The number must be at least 1.
-    Indexed(NonZeroU32),
+    /// `@0`, `@1`, `@2`, ... numeric anchors. Any non-negative `u32` is
+    /// accepted; a digit run whose numeric value would exceed `u32::MAX` is
+    /// rejected as a parse error rather than being silently truncated.
+    Indexed(u32),
 }
