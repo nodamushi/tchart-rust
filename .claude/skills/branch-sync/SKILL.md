@@ -53,6 +53,7 @@ Prefixes:
   git commit -m "restore task files"
   git branch -d local-old   # only after approval
 ```
+- **End-of-sync: HEAD MUST end on `local`.** The regrow step above already leaves you on the recreated `local`; do not switch away before reporting completion.
 
 ## develop → main
 
@@ -60,3 +61,4 @@ Prefixes:
 - Pre-check: if current version matches the latest tag `vX.Y.Z`, ask user whether to proceed without bumping. If declined, abort and bump patch on `local` (do not commit).
 - Steps: `git checkout main` → `git merge --no-ff develop`.
 - On conflict, do not touch it; report.
+- **End-of-sync: HEAD MUST end on `local`.** After the merge (and any conflict resolution), run `git checkout local` before reporting completion.

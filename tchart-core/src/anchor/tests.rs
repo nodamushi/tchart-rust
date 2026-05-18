@@ -1,7 +1,5 @@
 //! Unit tests for `anchor`.
 
-use std::num::NonZeroU32;
-
 use super::{AnchorId, AnchorName, AnchorNameError, ResolvedAnchor};
 use crate::geometry::Point;
 
@@ -51,7 +49,7 @@ fn anchor_name_rejects_invalid_tail() {
 #[test]
 fn anchor_id_named_and_indexed_are_distinct() {
     let named = AnchorId::Named(AnchorName::parse("a").expect("ok"));
-    let indexed = AnchorId::Indexed(NonZeroU32::new(1).expect("nz"));
+    let indexed = AnchorId::Indexed(1);
     assert_ne!(named, indexed);
 }
 

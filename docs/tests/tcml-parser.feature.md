@@ -1137,13 +1137,29 @@ TCML テキストを解析して `ChartDocument` を生成する機能のテス�
 - Given `@{a-b-c}`
 - Then 受理
 
-### Scenario: アンカー番号が 0
-- Given `@0` という行
-- Then パースエラー (`@N` は正整数 1 以上)
+### Scenario: アンカー番号 0 は受理 (numbered anchor 0)
+- Given `Sig _~@0_~` という信号行を 1 回だけ書く
+- Then `elements` に `Anchor(Indexed(0))` が含まれパースエラーにならない
 
 ### Scenario: アンカー番号が極端に大きい (例: `@99999`)
 - Given `@99999` を信号行で 1 回定義し `@-> (@99999, @1)` で参照
 - Then 受理される (上限なし)
+
+### Scenario: アンカー番号 0 を `@->` 端点として参照
+- Given `Sig _~@0__@1` と `@-> (@0, @1)`
+- Then パースエラーにならず、矢印は numbered anchor 0 と 1 の 2 座標を結ぶ
+
+### Scenario: アンカー番号 0 の同一行重複は `DuplicateAnchor`
+- Given 同一信号行内で `@0` を 2 回使う (`Sig _@0_~@0_`)
+- Then `ParseError::DuplicateAnchor`
+
+### Scenario: アンカー番号 0 の別信号行重複は `DuplicateAnchor`
+- Given `Sig1 _~@0_` と `Sig2 _~@0_` を同一ファイルに記述
+- Then `ParseError::DuplicateAnchor` (信号行を跨いでも numbered anchor は単一名前空間)
+
+### Scenario: 名前付き `@{0}` と番号付き `@0` は別アンカー (値 0 でも名前空間分離)
+- Given `Sig _~@{0}__@0` と `@-> (@{0}, @0)`
+- Then パースエラーにならず両者は別アンカーとして解決され、矢印は 2 つの異なる座標を結ぶ
 
 ### Scenario: 信号名が UTF-8 マルチバイト (日本語)
 - Given `クロック _~_~`

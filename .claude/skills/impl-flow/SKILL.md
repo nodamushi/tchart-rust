@@ -13,6 +13,10 @@ You must clearly indicate which step has been completed, specify the status of e
 
 You AI guys always try to jump straight to Step 4, but that won’t fly.
 
+# Pre-flight: branch check
+
+Before doing anything, run `git rev-parse --abbrev-ref HEAD` and verify the current branch is a branch derived from `local` — NOT `develop`, NOT `main`. If the current branch is `develop` or `main`, switch to a branch derived from `local` BEFORE Step 1.
+
 # Status update rule
 
 "Update status" means APPEND, not overwrite.

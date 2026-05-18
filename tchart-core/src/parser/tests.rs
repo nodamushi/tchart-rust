@@ -1,8 +1,6 @@
 //! Parser unit tests covering the scenarios in
 //! `docs/tests/tcml-parser.feature.md`.
 
-use std::num::NonZeroU32;
-
 use crate::anchor::AnchorId;
 use crate::arrow::{ArrowEnd, ArrowHead, LineDashStyle};
 use crate::clock::ClockEdge;
@@ -779,7 +777,7 @@ fn anchor_named_recorded() {
 #[test]
 fn anchor_indexed_recorded() {
     let doc = parse_or_panic("SigA ___@1__");
-    let id = AnchorId::Indexed(NonZeroU32::new(1).expect("non-zero"));
+    let id = AnchorId::Indexed(1);
     assert!(doc.annotations.anchors.contains(&id));
 }
 
@@ -787,6 +785,80 @@ fn anchor_indexed_recorded() {
 fn duplicate_anchor_errors() {
     let error = parse_error("SigA @{a}__@{a}__");
     assert!(matches!(error.kind(), ParseErrorKind::DuplicateAnchor));
+}
+
+/// `@0` を 1 個だけ書いた信号行が受理され、波形要素列に
+/// `Anchor(Indexed(0))` が登場することを確認する
+/// (`docs/tests/tcml-parser.feature.md` の「アンカー番号 0 は受理」).
+#[test]
+fn anchor_indexed_zero_recorded() {
+    let row = first_signal("Sig _~@0_~");
+    let elements: &[WaveformElement] = row.waveform();
+    let found_zero = elements.iter().any(|element| {
+        matches!(
+            element,
+            WaveformElement::Anchor(AnchorId::Indexed(value)) if *value == 0
+        )
+    });
+    assert!(
+        found_zero,
+        "expected Anchor(Indexed(0)) in waveform elements: {elements:?}"
+    );
+}
+
+/// `@0` と `@1` を端点に持つ `@->` が受理され、矢印の両端が
+/// numbered anchor 0 と 1 を指すことを確認する.
+#[test]
+fn arrow_endpoints_accept_numbered_anchor_zero() {
+    let doc = parse_or_panic("Sig _~@0__@1\n@-> (@0, @1)");
+    let arrow = doc
+        .annotations
+        .arrows
+        .first()
+        .expect("@-> must produce one arrow");
+    let zero = AnchorId::Indexed(0);
+    let one = AnchorId::Indexed(1);
+    assert_eq!(arrow.from, ArrowEnd::Anchor(zero));
+    assert_eq!(arrow.to, ArrowEnd::Anchor(one));
+}
+
+/// 同一信号行内で `@0` が 2 回現れたら `DuplicateAnchor`.
+#[test]
+fn duplicate_anchor_indexed_zero_same_row_errors() {
+    let error = parse_error("Sig _@0_~@0_");
+    assert!(
+        matches!(error.kind(), ParseErrorKind::DuplicateAnchor),
+        "expected DuplicateAnchor, got {:?}",
+        error.kind()
+    );
+}
+
+/// 別信号行で `@0` が 2 回現れても `DuplicateAnchor`
+/// (numbered anchor は単一名前空間).
+#[test]
+fn duplicate_anchor_indexed_zero_across_rows_errors() {
+    let error = parse_error("Sig1 _~@0_\nSig2 _~@0_");
+    assert!(
+        matches!(error.kind(), ParseErrorKind::DuplicateAnchor),
+        "expected DuplicateAnchor, got {:?}",
+        error.kind()
+    );
+}
+
+/// `@{0}` (named, 値 "0") と `@0` (indexed, 値 0) は別名前空間で
+/// 共存可能。`@->` で両者を別端点として参照できる.
+#[test]
+fn named_zero_and_indexed_zero_are_distinct() {
+    let doc = parse_or_panic("Sig _~@{0}__@0\n@-> (@{0}, @0)");
+    let arrow = doc
+        .annotations
+        .arrows
+        .first()
+        .expect("@-> must produce one arrow");
+    let named = AnchorId::Named(crate::anchor::AnchorName::parse("0").expect("valid"));
+    let indexed = AnchorId::Indexed(0);
+    assert_eq!(arrow.from, ArrowEnd::Anchor(named));
+    assert_eq!(arrow.to, ArrowEnd::Anchor(indexed));
 }
 
 /// アンカーが遷移の後にある場合、最終 Waveform でのインデックスが
@@ -2494,11 +2566,6 @@ fn anchor_name_starting_with_underscore_accepted() {
 #[test]
 fn anchor_name_with_hyphen_accepted() {
     parse_or_panic("Sig _~@{a-b-c}_\n");
-}
-
-#[test]
-fn anchor_number_zero_is_rejected() {
-    parse_error("Sig _~@0_\n");
 }
 
 #[test]

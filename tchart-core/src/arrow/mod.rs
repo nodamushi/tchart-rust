@@ -2,8 +2,6 @@
 //!
 //! See `docs/spec/types.md` §3.5.
 
-use std::num::NonZeroU32;
-
 use crate::anchor::{AnchorId, AnchorName};
 use crate::color::Color;
 use crate::errors::{ParseError, ParseErrorKind, SourceLocation};
@@ -126,10 +124,7 @@ impl ArrowEnd {
         let value: u32 = text.parse().map_err(|_| {
             ParseError::with_length(location, length, ParseErrorKind::InvalidArrowSyntax)
         })?;
-        let nonzero = NonZeroU32::new(value).ok_or_else(|| {
-            ParseError::with_length(location, length, ParseErrorKind::InvalidArrowSyntax)
-        })?;
-        Ok(Self::Anchor(AnchorId::Indexed(nonzero)))
+        Ok(Self::Anchor(AnchorId::Indexed(value)))
     }
 }
 

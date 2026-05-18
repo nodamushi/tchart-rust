@@ -109,7 +109,10 @@ impl PendingAnchor {
 fn anchor_token_length(id: &AnchorId) -> u32 {
     let inner = match id {
         AnchorId::Named(name) => name.char_count() + 2, // {}
-        AnchorId::Indexed(value) => value.get().to_string().chars().count(),
+        // `u32::MAX` is 10 decimal digits, so `ilog10()+1` (with 0 handled
+        // explicitly) computes the digit count without allocating a `String`.
+        AnchorId::Indexed(0) => 1,
+        AnchorId::Indexed(value) => value.ilog10() as usize + 1,
     };
     u32::try_from(inner + 1).unwrap_or(u32::MAX) // leading '@'
 }
@@ -198,7 +201,7 @@ impl PendingArrow {
 fn anchor_id_display(id: &AnchorId) -> String {
     match id {
         AnchorId::Named(name) => format!("@{{{}}}", name.as_str()),
-        AnchorId::Indexed(value) => format!("@{}", value.get()),
+        AnchorId::Indexed(value) => format!("@{value}"),
     }
 }
 
