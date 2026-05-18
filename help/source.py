@@ -436,7 +436,7 @@ Ack   ________@{a}~~~
                 {"type": "heading", "level": 3, "text": "アンカーの規則"},
                 {
                     "type": "text",
-                    "content": "<ul><li><code>@{name}</code> または <code>@N</code> (1 以上の整数) で指定します。0 幅マーカーで x 進行に影響しません。</li><li>名前付きと番号付きは別の名前空間として扱われます (<code>@{1}</code> と <code>@1</code> は別物です)。</li><li>同一 ID を重複定義するとエラーになります。</li><li>アンカー名に使える文字は半角英数とアンダースコア・ハイフンで、先頭は英字またはアンダースコアです (正規表現で書くと <code>[A-Za-z_][A-Za-z0-9_-]*</code>)。</li><li><code>?</code> の塗り範囲を決めるときアンカーは無視されません (アンカー単独では <code>?</code> の直前レベルにはなりません)。</li></ul>",
+                    "content": "<ul><li><code>@{name}</code> または <code>@N</code> (0 以上の整数) で指定します。0 幅マーカーで x 進行に影響しません。</li><li>名前付きと番号付きは別の名前空間として扱われます (<code>@{1}</code> と <code>@1</code> は別物です)。</li><li>同一 ID を重複定義するとエラーになります。</li><li>アンカー名に使える文字は半角英数とアンダースコア・ハイフンで、先頭は英字またはアンダースコアです (正規表現で書くと <code>[A-Za-z_][A-Za-z0-9_-]*</code>)。</li><li><code>?</code> の塗り範囲を決めるときアンカーは無視されません (アンカー単独では <code>?</code> の直前レベルにはなりません)。</li></ul>",
                 },
                 {"type": "heading", "level": 3, "text": "矢印の書式"},
                 {
@@ -1406,7 +1406,7 @@ Ack   ________@{a}~~~
                 {"type": "heading", "level": 3, "text": "Anchor rules"},
                 {
                     "type": "text",
-                    "content": "<ul><li>Use <code>@{name}</code> or <code>@N</code> (a positive integer). Anchors are zero-width and do not advance x.</li><li>Named and numbered anchors live in separate namespaces (<code>@{1}</code> and <code>@1</code> are different).</li><li>Defining the same id twice is an error.</li><li>Anchor names accept ASCII letters, digits, underscore, and hyphen, and must start with a letter or underscore (regex <code>[A-Za-z_][A-Za-z0-9_-]*</code>).</li><li>Anchors are <strong>not</strong> transparent for the <code>?</code> lookup: an anchor by itself does not become the level used to determine a following <code>?</code>.</li></ul>",
+                    "content": "<ul><li>Use <code>@{name}</code> or <code>@N</code> (a non-negative integer). Anchors are zero-width and do not advance x.</li><li>Named and numbered anchors live in separate namespaces (<code>@{1}</code> and <code>@1</code> are different).</li><li>Defining the same id twice is an error.</li><li>Anchor names accept ASCII letters, digits, underscore, and hyphen, and must start with a letter or underscore (regex <code>[A-Za-z_][A-Za-z0-9_-]*</code>).</li><li>Anchors are <strong>not</strong> transparent for the <code>?</code> lookup: an anchor by itself does not become the level used to determine a following <code>?</code>.</li></ul>",
                 },
                 {"type": "heading", "level": 3, "text": "Arrow syntax"},
                 {
